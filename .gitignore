@@ -1,0 +1,21 @@
+*.iml
+.gradle
+.kotlin
+/local.properties
+/.idea
+.DS_Store
+/build
+/app/build
+/BgRemover_apk
+*.apk
+captures
+.externalNativeBuild
+.cxx
+
+# Test, demo, mockup and autotest evidence
+/autotest_evidence/
+/run_avd_tests.py
+/autotest/
+/evidence/
+/mockup/
+/demo/

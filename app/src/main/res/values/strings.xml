@@ -1,0 +1,22 @@
+<resources>
+    <string name="app_name">Tách Nền PNG</string>
+    <string name="app_tagline">Tách nền ảnh tự động thành PNG trong suốt</string>
+    <string name="pick_image">Chọn ảnh từ máy</string>
+    <string name="take_photo">Chụp ảnh mới</string>
+    <string name="recent_creations">Ảnh đã lưu gần đây</string>
+    <string name="no_recent_creations">Chưa có ảnh nào được lưu</string>
+    <string name="processing_image">Đang xử lý tách nền bằng AI...</string>
+    <string name="downloading_model">Đang chuẩn bị mô hình AI lần đầu...</string>
+    <string name="save_png">Lưu ảnh PNG</string>
+    <string name="share_png">Chia sẻ ảnh</string>
+    <string name="undo">Hoàn tác</string>
+    <string name="redo">Làm lại</string>
+    <string name="tool_auto">Tự động (AI)</string>
+    <string name="tool_erase">Cọ tẩy</string>
+    <string name="tool_restore">Cọ phục hồi</string>
+    <string name="tool_background">Đổi phông xem</string>
+    <string name="brush_size">Cỡ cọ: %1$d px</string>
+    <string name="compare_original">Giữ để xem ảnh gốc</string>
+    <string name="saved_successfully">Đã lưu ảnh trong suốt vào Thư viện!</string>
+    <string name="save_failed">Lưu ảnh thất bại: %1$s</string>
+</resources>
