@@ -27,7 +27,8 @@ import java.util.BitSet
 
 enum class CutoutMode {
     SMART_AUTO,     // Tự động nhận diện: Cân bằng tối ưu bằng AI neural network (chủ thể & trang phục hoàn chỉnh)
-    SMART_OBJECT    // Tách vật thể & chi tiết: Giữ nguyên đạo cụ, nội thất (lò sưởi, cầu thang, cửa sổ) với viền sắc nét 100%
+    SMART_OBJECT,   // Tách vật thể & chi tiết: Giữ nguyên đạo cụ, nội thất (lò sưởi, sticker) với viền sắc nét 100%
+    SMART_CLEAN     // Xóa kẽ & viền: Tách sâu kẽ hở giữa người & vật thể, tự động loại bỏ nét đứt viền
 }
 
 class BgRemoverEngine(private val context: Context) {
@@ -86,16 +87,21 @@ class BgRemoverEngine(private val context: Context) {
                 // razor-sharp edges without the blurry white halo of low-res neural masks.
                 // aiProtectedMask guarantees that light dresses (like Image 4) are never eroded.
                 // ===================================================================
-                if (bgAnalysis.isUniform && (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_AUTO)) {
+                if (bgAnalysis.isUniform && (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_AUTO || mode == CutoutMode.SMART_CLEAN)) {
                     try {
-                        val keepStickers = (mode == CutoutMode.SMART_OBJECT)
+                        val keepStickers = (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_CLEAN)
+                        val cleanCavities = (mode == CutoutMode.SMART_CLEAN)
+                        val removeDashes = (mode == CutoutMode.SMART_CLEAN)
+                        val tol = if (mode == CutoutMode.SMART_CLEAN) 14 else 16
                         val aiMask = getAiForegroundMask(inputBitmap, inputImage)
-                        Log.d(TAG, "Running full-res SmartCutoutEngine (keepStickers=$keepStickers, hasAiMask=${aiMask != null}, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
+                        Log.d(TAG, "Running full-res SmartCutoutEngine (mode=$mode, keepStickers=$keepStickers, cleanCavities=$cleanCavities, removeDashes=$removeDashes, tol=$tol, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
                         val smartResult = SmartCutoutEngine.removeBackground(
                             bitmap = inputBitmap,
-                            tolerance = 14,
+                            tolerance = tol,
                             minComponentRatio = 0.008f,
                             keepFloatingStickers = keepStickers,
+                            cleanCavities = cleanCavities,
+                            removeDashedOutlines = removeDashes,
                             aiProtectedMask = null
                         )
                         return@withLock Result.success(smartResult)
@@ -108,10 +114,10 @@ class BgRemoverEngine(private val context: Context) {
                 // ===================================================================
                 // General AI Segmentation (for non-uniform real-world environments)
                 // ===================================================================
-                val (highThresh, lowThresh) = if (mode == CutoutMode.SMART_OBJECT) {
-                    Pair(0.48f, 0.35f)
-                } else {
-                    Pair(0.55f, 0.42f)
+                val (highThresh, lowThresh) = when (mode) {
+                    CutoutMode.SMART_OBJECT -> Pair(0.48f, 0.35f)
+                    CutoutMode.SMART_CLEAN -> Pair(0.55f, 0.42f)
+                    CutoutMode.SMART_AUTO -> Pair(0.55f, 0.42f)
                 }
 
                 val autoResult = runAiSegmentation(

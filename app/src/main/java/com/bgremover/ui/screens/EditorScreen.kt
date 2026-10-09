@@ -161,6 +161,7 @@ fun EditorScreen(
                 currentCutoutMode = mode
                 processingMessage = when (mode) {
                     CutoutMode.SMART_OBJECT -> "Đang giữ trọn chi tiết, đồ vật & phụ kiện..."
+                    CutoutMode.SMART_CLEAN -> "Đang xóa kẽ hở và loại bỏ nét đứt viền..."
                     CutoutMode.SMART_AUTO -> "Đang tự động nhận diện chủ thể tối ưu..."
                 }
 
@@ -533,31 +534,33 @@ fun EditorScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 val isAutoActive = currentCutoutMode == CutoutMode.SMART_AUTO
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
+                                        .clip(RoundedCornerShape(12.dp))
                                         .background(if (isAutoActive) PrimaryIndigo.copy(alpha = 0.25f) else StudioCardBgElevated)
-                                        .border(1.dp, if (isAutoActive) PrimaryCyan else StudioBorder, RoundedCornerShape(14.dp))
+                                        .border(1.dp, if (isAutoActive) PrimaryCyan else StudioBorder, RoundedCornerShape(12.dp))
                                         .clickable { performAiCutout(CutoutMode.SMART_AUTO) }
-                                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                                        .padding(horizontal = 4.dp, vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text(
                                             text = "✨ Tự động AI",
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
                                             color = if (isAutoActive) PrimaryCyan else TextPrimary
                                         )
                                         Text(
                                             text = "Cân bằng tối ưu",
-                                            fontSize = 10.sp,
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
                                             color = TextSecondary
                                         )
                                     }
@@ -567,23 +570,53 @@ fun EditorScreen(
                                 Box(
                                     modifier = Modifier
                                         .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
+                                        .clip(RoundedCornerShape(12.dp))
                                         .background(if (isSmartActive) PrimaryIndigo.copy(alpha = 0.25f) else StudioCardBgElevated)
-                                        .border(1.dp, if (isSmartActive) PrimaryCyan else StudioBorder, RoundedCornerShape(14.dp))
+                                        .border(1.dp, if (isSmartActive) PrimaryCyan else StudioBorder, RoundedCornerShape(12.dp))
                                         .clickable { performAiCutout(CutoutMode.SMART_OBJECT) }
-                                        .padding(horizontal = 8.dp, vertical = 8.dp),
+                                        .padding(horizontal = 4.dp, vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text(
                                             text = "🎯 Giữ chi tiết",
-                                            fontSize = 12.sp,
+                                            fontSize = 11.sp,
                                             fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
                                             color = if (isSmartActive) PrimaryCyan else TextPrimary
                                         )
                                         Text(
                                             text = "Đồ vật & phụ kiện",
-                                            fontSize = 10.sp,
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+
+                                val isCleanActive = currentCutoutMode == CutoutMode.SMART_CLEAN
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(12.dp))
+                                        .background(if (isCleanActive) PrimaryIndigo.copy(alpha = 0.25f) else StudioCardBgElevated)
+                                        .border(1.dp, if (isCleanActive) PrimaryCyan else StudioBorder, RoundedCornerShape(12.dp))
+                                        .clickable { performAiCutout(CutoutMode.SMART_CLEAN) }
+                                        .padding(horizontal = 4.dp, vertical = 8.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text(
+                                            text = "✂️ Xóa kẽ & viền",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            color = if (isCleanActive) PrimaryCyan else TextPrimary
+                                        )
+                                        Text(
+                                            text = "Lọc kẽ & nét đứt",
+                                            fontSize = 9.sp,
+                                            maxLines = 1,
                                             color = TextSecondary
                                         )
                                     }
