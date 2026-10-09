@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         parseIntent(intent)
+        initMlKitModules()
 
         setContent {
             BgRemoverTheme {
@@ -88,13 +89,26 @@ class MainActivity : ComponentActivity() {
         } else if (intent.action == Intent.ACTION_VIEW && intent.data != null) {
             incomingImageUriState.value = intent.data
         } else if (intent.hasExtra("image_path")) {
-            val path = intent.getStringExtra("image_path")
-            if (!path.isNullOrBlank()) {
-                val file = File(path)
-                if (file.exists()) {
-                    incomingImageUriState.value = Uri.fromFile(file)
-                }
+            val rawPath = intent.getStringExtra("image_path")?.trim('\'', '"')
+            if (!rawPath.isNullOrBlank()) {
+                val file = File(rawPath)
+                android.util.Log.d("MainActivity", "Processing image_path=$rawPath, exists=${file.exists()}")
+                incomingImageUriState.value = Uri.fromFile(file)
             }
+        }
+    }
+
+    private fun initMlKitModules() {
+        try {
+            val moduleInstallClient = com.google.android.gms.common.moduleinstall.ModuleInstall.getClient(this)
+            val options = com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions.Builder().build()
+            val segmenter = com.google.mlkit.vision.segmentation.subject.SubjectSegmentation.getClient(options)
+            val request = com.google.android.gms.common.moduleinstall.ModuleInstallRequest.newBuilder()
+                .addApi(segmenter)
+                .build()
+            moduleInstallClient.installModules(request)
+        } catch (_: Throwable) {
+            // Safely ignore if GMS or ModuleInstall is unavailable
         }
     }
 }
@@ -113,13 +127,19 @@ fun MainContent(
 
     fun loadBitmapFromUri(uri: Uri) {
         scope.launch {
-            isLoadingImage = true
-            val bitmap = BitmapUtils.loadBitmapFromUri(context, uri)
-            isLoadingImage = false
-            if (bitmap != null) {
-                activeBitmap = bitmap
-            } else {
-                Toast.makeText(context, "Không thể đọc định dạng ảnh này", Toast.LENGTH_SHORT).show()
+            try {
+                isLoadingImage = true
+                val bitmap = BitmapUtils.loadBitmapFromUri(context, uri)
+                isLoadingImage = false
+                if (bitmap != null) {
+                    activeBitmap = bitmap
+                } else {
+                    Toast.makeText(context, "Không thể đọc định dạng ảnh này", Toast.LENGTH_SHORT).show()
+                }
+            } catch (t: Throwable) {
+                isLoadingImage = false
+                android.util.Log.e("MainActivity", "Failed to load image from $uri", t)
+                Toast.makeText(context, "Lỗi đọc ảnh: ${t.message}", Toast.LENGTH_SHORT).show()
             }
         }
     }

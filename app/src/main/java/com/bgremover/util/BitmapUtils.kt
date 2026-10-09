@@ -31,6 +31,19 @@ import java.util.Locale
 
 object BitmapUtils {
 
+    private fun openStream(context: Context, uri: Uri): InputStream? {
+        return try {
+            context.contentResolver.openInputStream(uri)
+        } catch (_: Exception) {
+            null
+        } ?: try {
+            val path = uri.path
+            if (path != null) java.io.FileInputStream(File(path)) else null
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     suspend fun loadBitmapFromUri(context: Context, uri: Uri, maxDimension: Int = 2048): Bitmap? =
         withContext(Dispatchers.IO) {
             try {
@@ -38,7 +51,7 @@ object BitmapUtils {
                 val options = BitmapFactory.Options().apply {
                     inJustDecodeBounds = true
                 }
-                context.contentResolver.openInputStream(uri)?.use { stream ->
+                openStream(context, uri)?.use { stream ->
                     BitmapFactory.decodeStream(stream, null, options)
                 }
 
@@ -54,39 +67,58 @@ object BitmapUtils {
                     height /= 2
                 }
 
-                val decodeOptions = BitmapFactory.Options().apply {
-                    inSampleSize = sampleSize
-                    inPreferredConfig = Bitmap.Config.ARGB_8888
-                    inMutable = true
+                fun decodeWithSample(s: Int): Bitmap? {
+                    return try {
+                        val decodeOptions = BitmapFactory.Options().apply {
+                            inSampleSize = s
+                            inPreferredConfig = Bitmap.Config.ARGB_8888
+                            inMutable = true
+                        }
+                        openStream(context, uri)?.use { stream ->
+                            BitmapFactory.decodeStream(stream, null, decodeOptions)
+                        }
+                    } catch (_: Throwable) {
+                        null
+                    }
                 }
 
-                val decodedBitmap = context.contentResolver.openInputStream(uri)?.use { stream ->
-                    BitmapFactory.decodeStream(stream, null, decodeOptions)
-                } ?: return@withContext null
+                var decodedBitmap = decodeWithSample(sampleSize)
+                // If decoding full size failed (e.g. low memory on device), retry with smaller sample
+                if (decodedBitmap == null && sampleSize < 4) {
+                    decodedBitmap = decodeWithSample(sampleSize * 2)
+                }
+
+                if (decodedBitmap == null) return@withContext null
 
                 // 3. Fix EXIF orientation
                 val orientation = getExifOrientation(context, uri)
                 if (orientation != 0) {
-                    val matrix = Matrix().apply { postRotate(orientation.toFloat()) }
-                    val rotated = Bitmap.createBitmap(
-                        decodedBitmap, 0, 0,
-                        decodedBitmap.width, decodedBitmap.height,
-                        matrix, true
-                    )
-                    decodedBitmap.recycle()
-                    rotated
+                    try {
+                        val matrix = Matrix().apply { postRotate(orientation.toFloat()) }
+                        val rotated = Bitmap.createBitmap(
+                            decodedBitmap, 0, 0,
+                            decodedBitmap.width, decodedBitmap.height,
+                            matrix, true
+                        )
+                        if (rotated != decodedBitmap) {
+                            decodedBitmap.recycle()
+                        }
+                        rotated
+                    } catch (_: Throwable) {
+                        decodedBitmap
+                    }
                 } else {
                     decodedBitmap
                 }
-            } catch (e: Exception) {
-                e.printStackTrace()
+            } catch (t: Throwable) {
+                t.printStackTrace()
                 null
             }
         }
 
     private fun getExifOrientation(context: Context, uri: Uri): Int {
         return try {
-            context.contentResolver.openInputStream(uri)?.use { stream ->
+            openStream(context, uri)?.use { stream ->
                 val exif = ExifInterface(stream)
                 when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)) {
                     ExifInterface.ORIENTATION_ROTATE_90 -> 90
@@ -334,6 +366,10 @@ object BitmapUtils {
     }
 
     fun copyBitmap(source: Bitmap): Bitmap {
-        return source.copy(Bitmap.Config.ARGB_8888, true)
+        return try {
+            source.copy(Bitmap.Config.ARGB_8888, true) ?: source
+        } catch (_: Throwable) {
+            source
+        }
     }
 }

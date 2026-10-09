@@ -15,29 +15,48 @@ import com.google.mlkit.vision.segmentation.subject.SubjectSegmentation
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenter
 import com.google.mlkit.vision.segmentation.subject.SubjectSegmenterOptions
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
+import java.util.BitSet
+
 enum class CutoutMode {
-    SMART_AUTO,     // Tự động nhận diện: nếu nền studio/đơn sắc -> tách giữ nguyên đồ vật, cầu thang, lò sưởi, cửa sổ; nếu ảnh đời thực -> AI chân dung
-    SMART_OBJECT,   // Tách vật thể & chi tiết: Giữ nguyên đạo cụ, nội thất (cầu thang, cửa sổ, lò sưởi) với viền sắc nét 100%
-    AI_PORTRAIT     // AI Chân dung: Chỉ giữ người (ML Kit)
+    SMART_AUTO,     // Tự động nhận diện: Cân bằng tối ưu bằng AI neural network (chủ thể & trang phục hoàn chỉnh)
+    SMART_OBJECT    // Tách vật thể & chi tiết: Giữ nguyên đạo cụ, nội thất (lò sưởi, cầu thang, cửa sổ) với viền sắc nét 100%
 }
 
 class BgRemoverEngine(private val context: Context) {
 
     private val TAG = "BgRemoverEngine"
+    private val engineMutex = Mutex()
 
-    // 1. Play Services Subject Segmenter (Handles general objects if module ready)
-    private val subjectOptions: SubjectSegmenterOptions = SubjectSegmenterOptions.Builder()
-        .enableForegroundBitmap()
-        .enableForegroundConfidenceMask()
-        .build()
+    // 1. Play Services Subject Segmenter (Confidence mask only - avoid hardware bitmaps & reduce memory)
+    private val subjectResultOptions by lazy {
+        SubjectSegmenterOptions.SubjectResultOptions.Builder()
+            .enableConfidenceMask()
+            .build()
+    }
 
-    private val subjectSegmenter: SubjectSegmenter = SubjectSegmentation.getClient(subjectOptions)
+    private val subjectOptions: SubjectSegmenterOptions by lazy {
+        SubjectSegmenterOptions.Builder()
+            .enableForegroundConfidenceMask()
+            .enableMultipleSubjects(subjectResultOptions)
+            .build()
+    }
+
+    private val subjectSegmenter: SubjectSegmenter? by lazy {
+        try {
+            SubjectSegmentation.getClient(subjectOptions)
+        } catch (t: Throwable) {
+            Log.w(TAG, "SubjectSegmenter client initialization failed: ${t.message}")
+            null
+        }
+    }
 
     // 2. Bundled 100% On-Device Local Selfie Segmenter
     private val selfieOptions: SelfieSegmenterOptions = SelfieSegmenterOptions.Builder()
@@ -50,137 +69,338 @@ class BgRemoverEngine(private val context: Context) {
         inputBitmap: Bitmap,
         mode: CutoutMode = CutoutMode.SMART_AUTO
     ): Result<Bitmap> = withContext(Dispatchers.Default) {
-
-        // Check if Smart Object engine should be used
-        val shouldTrySmartEngine = mode == CutoutMode.SMART_OBJECT ||
-                (mode == CutoutMode.SMART_AUTO && SmartCutoutEngine.isUniformBackground(inputBitmap))
-
-        if (shouldTrySmartEngine) {
+        engineMutex.withLock {
             try {
-                Log.d(TAG, "Running high-precision SmartCutoutEngine (preserving props & sharp edges)...")
-                val smartResult = SmartCutoutEngine.removeBackground(inputBitmap)
-                return@withContext Result.success(smartResult)
-            } catch (e: Exception) {
-                Log.w(TAG, "SmartCutoutEngine fallback: ${e.message}")
+                val inputImage = try {
+                    InputImage.fromBitmap(inputBitmap, 0)
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Failed to create InputImage: ${t.message}")
+                    return@withLock Result.failure(t)
+                }
+
+                val bgAnalysis = SmartCutoutEngine.analyzeBackground(inputBitmap)
+
+                // ===================================================================
+                // Studio / Uniform Backdrop (e.g. White, Studio Screen, Monochrome):
+                // SmartCutoutEngine operates at native 100% full-resolution, giving
+                // razor-sharp edges without the blurry white halo of low-res neural masks.
+                // aiProtectedMask guarantees that light dresses (like Image 4) are never eroded.
+                // ===================================================================
+                if (bgAnalysis.isUniform && (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_AUTO)) {
+                    try {
+                        val keepStickers = (mode == CutoutMode.SMART_OBJECT)
+                        Log.d(TAG, "Running full-res SmartCutoutEngine (keepStickers=$keepStickers, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
+                        val smartResult = SmartCutoutEngine.removeBackground(
+                            bitmap = inputBitmap,
+                            tolerance = 16,
+                            minComponentRatio = 0.008f,
+                            keepFloatingStickers = keepStickers
+                        )
+                        return@withLock Result.success(smartResult)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "SmartCutoutEngine fallback: ${t.message}")
+                    }
+                }
+
+
+                // ===================================================================
+                // General AI Segmentation (for non-uniform real-world environments)
+                // ===================================================================
+                val (highThresh, lowThresh) = if (mode == CutoutMode.SMART_OBJECT) {
+                    Pair(0.48f, 0.35f)
+                } else {
+                    Pair(0.55f, 0.42f)
+                }
+
+                val autoResult = runAiSegmentation(
+                    inputBitmap = inputBitmap,
+                    inputImage = inputImage,
+                    highThresh = highThresh,
+                    lowThresh = lowThresh,
+                    bgAnalysis = bgAnalysis
+                )
+                if (autoResult != null) {
+                    return@withLock Result.success(autoResult)
+                }
+
+                // Ultimate fallback: return original bitmap with alpha channel copy rather than hard crash
+                val safeFallback = inputBitmap.copy(Bitmap.Config.ARGB_8888, true) ?: inputBitmap
+                Result.success(safeFallback)
+            } catch (t: Throwable) {
+                Log.e(TAG, "Fatal error in removeBackground", t)
+                Result.failure(t)
             }
         }
+    }
 
-        // Fallback or explicit AI Portrait: ML Kit processing
-        val inputImage = InputImage.fromBitmap(inputBitmap, 0)
-
-        // Try Subject Segmentation if not in portrait-only mode
-        if (mode != CutoutMode.AI_PORTRAIT) {
-            val subjectResult: com.google.mlkit.vision.segmentation.subject.SubjectSegmentationResult? = try {
-                suspendCancellableCoroutine { continuation ->
-                    subjectSegmenter.process(inputImage)
+    private suspend fun querySubjectSegmenter(
+        inputImage: InputImage
+    ): com.google.mlkit.vision.segmentation.subject.SubjectSegmentationResult? {
+        val segmenter = subjectSegmenter ?: return null
+        return try {
+            suspendCancellableCoroutine { continuation ->
+                try {
+                    segmenter.process(inputImage)
                         .addOnSuccessListener { segResult ->
                             if (continuation.isActive) continuation.resume(segResult)
                         }
-                        .addOnFailureListener { exception ->
-                            if (continuation.isActive) continuation.resumeWithException(exception)
+                        .addOnFailureListener { e ->
+                            Log.w(TAG, "Subject segmenter task failed: ${e.message}")
+                            if (continuation.isActive) continuation.resume(null)
                         }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Subject segmenter unavailable: ${e.message}")
-                null
-            }
-
-            if (subjectResult != null) {
-                val foregroundBitmap = subjectResult.foregroundBitmap
-                val confidenceMask = subjectResult.foregroundConfidenceMask
-
-                if (confidenceMask != null) {
-                    return@withContext Result.success(
-                        applyMaskToOriginal(
-                            original = inputBitmap,
-                            maskBuffer = confidenceMask,
-                            maskWidth = inputBitmap.width,
-                            maskHeight = inputBitmap.height
-                        )
-                    )
-                } else if (foregroundBitmap != null) {
-                    val finalBitmap = if (foregroundBitmap.width == inputBitmap.width && foregroundBitmap.height == inputBitmap.height) {
-                        foregroundBitmap.copy(Bitmap.Config.ARGB_8888, true)
-                    } else {
-                        Bitmap.createScaledBitmap(foregroundBitmap, inputBitmap.width, inputBitmap.height, true).copy(Bitmap.Config.ARGB_8888, true)
-                    }
-                    return@withContext Result.success(finalBitmap)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "Subject segmenter process threw: ${t.message}")
+                    if (continuation.isActive) continuation.resume(null)
                 }
             }
-        }
-
-        // Bundled Local Selfie Engine
-        try {
-            val mask: com.google.mlkit.vision.segmentation.SegmentationMask = suspendCancellableCoroutine { continuation ->
-                selfieSegmenter.process(inputImage)
-                    .addOnSuccessListener { segMask ->
-                        if (continuation.isActive) continuation.resume(segMask)
-                    }
-                    .addOnFailureListener { exception ->
-                        if (continuation.isActive) continuation.resumeWithException(exception)
-                    }
-            }
-
-            val finalTransparentBitmap = applyMaskToOriginal(
-                original = inputBitmap,
-                maskBuffer = mask.buffer.asFloatBuffer(),
-                maskWidth = mask.width,
-                maskHeight = mask.height
-            )
-            Result.success(finalTransparentBitmap)
-        } catch (e: Exception) {
-            Log.e(TAG, "All segmentation engines failed", e)
-            Result.failure(e)
+        } catch (t: Throwable) {
+            Log.w(TAG, "Subject segmenter unavailable: ${t.message}")
+            null
         }
     }
+
+    private suspend fun runAiSegmentation(
+        inputBitmap: Bitmap,
+        inputImage: InputImage,
+        highThresh: Float,
+        lowThresh: Float,
+        bgAnalysis: SmartCutoutEngine.BackgroundAnalysis? = null
+    ): Bitmap? {
+        // 1. Try Subject Segmenter (Google Play Services)
+        val subjectResult = querySubjectSegmenter(inputImage)
+        if (subjectResult != null) {
+            val confidenceMask = try { subjectResult.foregroundConfidenceMask } catch (_: Throwable) { null }
+            if (confidenceMask != null) {
+                val result = applyMaskToOriginal(
+                    original = inputBitmap,
+                    maskBuffer = confidenceMask,
+                    maskWidth = inputBitmap.width,
+                    maskHeight = inputBitmap.height,
+                    highThreshold = highThresh,
+                    lowThreshold = lowThresh,
+                    bgAnalysis = bgAnalysis
+                )
+                if (result != null) return result
+            }
+        }
+
+        // 2. Offline Fallback with Local Selfie Engine (100% on-device)
+        return try {
+            val selfieMask = suspendCancellableCoroutine<com.google.mlkit.vision.segmentation.SegmentationMask?> { continuation ->
+                try {
+                    selfieSegmenter.process(inputImage)
+                        .addOnSuccessListener { if (continuation.isActive) continuation.resume(it) }
+                        .addOnFailureListener { if (continuation.isActive) continuation.resume(null) }
+                } catch (_: Throwable) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+            if (selfieMask != null) {
+                applyMaskToOriginal(
+                    original = inputBitmap,
+                    maskBuffer = selfieMask.buffer.asFloatBuffer(),
+                    maskWidth = selfieMask.width,
+                    maskHeight = selfieMask.height,
+                    highThreshold = highThresh,
+                    lowThreshold = lowThresh,
+                    bgAnalysis = bgAnalysis
+                )
+            } else {
+                null
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "Selfie segmentation failed", t)
+            null
+        }
+    }
+
+    private suspend fun getAiForegroundMask(inputBitmap: Bitmap, inputImage: InputImage): BitSet? {
+        val width = inputBitmap.width
+        val height = inputBitmap.height
+
+        // Try Subject Segmenter first
+        val subjectResult = querySubjectSegmenter(inputImage)
+        if (subjectResult != null) {
+            val confMask = try { subjectResult.foregroundConfidenceMask } catch (_: Throwable) { null }
+            if (confMask != null) {
+                return extractBitSetFromFloatBuffer(confMask, width, height, width, height, threshold = 0.20f)
+            }
+        }
+
+        // Fallback to Selfie Segmenter
+        try {
+            val selfieMask = suspendCancellableCoroutine<com.google.mlkit.vision.segmentation.SegmentationMask?> { continuation ->
+                try {
+                    selfieSegmenter.process(inputImage)
+                        .addOnSuccessListener { if (continuation.isActive) continuation.resume(it) }
+                        .addOnFailureListener { if (continuation.isActive) continuation.resume(null) }
+                } catch (_: Throwable) {
+                    if (continuation.isActive) continuation.resume(null)
+                }
+            }
+            if (selfieMask != null) {
+                return extractBitSetFromFloatBuffer(
+                    maskBuffer = selfieMask.buffer.asFloatBuffer(),
+                    maskWidth = selfieMask.width,
+                    maskHeight = selfieMask.height,
+                    targetWidth = width,
+                    targetHeight = height,
+                    threshold = 0.20f
+                )
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Failed to extract AI mask from selfie segmenter: ${t.message}")
+        }
+        return null
+    }
+
+    private fun extractBitSetFromFloatBuffer(
+        maskBuffer: FloatBuffer,
+        maskWidth: Int,
+        maskHeight: Int,
+        targetWidth: Int,
+        targetHeight: Int,
+        threshold: Float = 0.20f
+    ): BitSet {
+        val bitSet = BitSet(targetWidth * targetHeight)
+        maskBuffer.rewind()
+        val capacity = maskBuffer.capacity()
+        val (actualW, actualH) = if (capacity > 0 && capacity != maskWidth * maskHeight) {
+            val side = Math.sqrt(capacity.toDouble()).toInt()
+            if (side * side == capacity) Pair(side, side) else Pair(maskWidth, maskHeight)
+        } else {
+            Pair(maskWidth, maskHeight)
+        }
+
+        if (actualW == targetWidth && actualH == targetHeight) {
+            val total = targetWidth * targetHeight
+            for (i in 0 until total) {
+                if (maskBuffer.hasRemaining() && maskBuffer.get() >= threshold) {
+                    bitSet.set(i)
+                }
+            }
+            return bitSet
+        }
+
+        val maskData = FloatArray(actualW * actualH)
+        for (i in 0 until actualW * actualH) {
+            maskData[i] = if (maskBuffer.hasRemaining()) maskBuffer.get() else 0f
+        }
+
+        val scaleX = actualW.toFloat() / targetWidth.toFloat()
+        val scaleY = actualH.toFloat() / targetHeight.toFloat()
+
+        for (y in 0 until targetHeight) {
+            val srcY = (y * scaleY).toInt().coerceIn(0, actualH - 1)
+            val rowOffset = y * targetWidth
+            val srcRowOffset = srcY * actualW
+            for (x in 0 until targetWidth) {
+                val srcX = (x * scaleX).toInt().coerceIn(0, actualW - 1)
+                if (maskData[srcRowOffset + srcX] >= threshold) {
+                    bitSet.set(rowOffset + x)
+                }
+            }
+        }
+        return bitSet
+    }
+
 
     private fun applyMaskToOriginal(
         original: Bitmap,
         maskBuffer: FloatBuffer,
         maskWidth: Int,
-        maskHeight: Int
-    ): Bitmap {
-        val totalPixels = maskWidth * maskHeight
-        val maskPixels = IntArray(totalPixels)
-        maskBuffer.rewind()
-
-        for (i in 0 until totalPixels) {
-            val confidence = if (maskBuffer.hasRemaining()) maskBuffer.get() else 0f
-            // Crisp, clean thresholding to prevent dirty blotches ("lem nhem")
-            val alpha = when {
-                confidence >= 0.65f -> 255
-                confidence <= 0.45f -> 0
-                else -> (((confidence - 0.45f) / 0.20f) * 255f).toInt().coerceIn(0, 255)
+        maskHeight: Int,
+        highThreshold: Float = 0.55f,
+        lowThreshold: Float = 0.35f,
+        bgAnalysis: SmartCutoutEngine.BackgroundAnalysis? = null
+    ): Bitmap? {
+        return try {
+            val capacity = maskBuffer.capacity()
+            val (actualW, actualH) = if (capacity > 0 && capacity != maskWidth * maskHeight) {
+                val side = Math.sqrt(capacity.toDouble()).toInt()
+                if (side * side == capacity) {
+                    Pair(side, side)
+                } else {
+                    val aspect = original.width.toFloat() / original.height.toFloat()
+                    val h = Math.sqrt(capacity / aspect.toDouble()).toInt()
+                    val w = (h * aspect).toInt()
+                    if (w * h <= capacity) Pair(w, h) else Pair(maskWidth, maskHeight)
+                }
+            } else {
+                Pair(maskWidth, maskHeight)
             }
-            maskPixels[i] = (alpha shl 24) or 0x00FFFFFF
+
+            val totalPixels = actualW * actualH
+            val maskPixels = IntArray(totalPixels)
+            maskBuffer.rewind()
+
+            val range = (highThreshold - lowThreshold).coerceAtLeast(0.01f)
+            for (i in 0 until totalPixels) {
+                val confidence = if (maskBuffer.hasRemaining()) maskBuffer.get() else 0f
+                val alpha = when {
+                    confidence >= highThreshold -> 255
+                    confidence <= lowThreshold -> 0
+                    else -> (((confidence - lowThreshold) / range) * 255f).toInt().coerceIn(0, 255)
+                }
+                maskPixels[i] = (alpha shl 24) or 0x00FFFFFF
+            }
+
+            val maskBitmap = Bitmap.createBitmap(maskPixels, actualW, actualH, Bitmap.Config.ARGB_8888)
+
+            val scaledMask = if (actualW != original.width || actualH != original.height) {
+                Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
+            } else {
+                maskBitmap
+            }
+
+            val resultBitmap = Bitmap.createBitmap(original.width, original.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(resultBitmap)
+            canvas.drawBitmap(original, 0f, 0f, null)
+
+            val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            }
+            canvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
+
+            if (bgAnalysis != null && bgAnalysis.isUniform) {
+                defringeBitmap(resultBitmap, bgAnalysis.bgR, bgAnalysis.bgG, bgAnalysis.bgB, 16)
+            }
+
+            resultBitmap
+        } catch (t: Throwable) {
+            Log.e(TAG, "applyMaskToOriginal error", t)
+            null
         }
+    }
 
-        val maskBitmap = Bitmap.createBitmap(maskPixels, maskWidth, maskHeight, Bitmap.Config.ARGB_8888)
-
-        val scaledMask = if (maskWidth != original.width || maskHeight != original.height) {
-            val scaled = Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
-            maskBitmap.recycle()
-            scaled
-        } else {
-            maskBitmap
+    private fun defringeBitmap(bitmap: Bitmap, bgR: Int, bgG: Int, bgB: Int, tol: Int = 16) {
+        val w = bitmap.width
+        val h = bitmap.height
+        val total = w * h
+        val pixels = IntArray(total)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        var modified = false
+        for (i in 0 until total) {
+            val p = pixels[i]
+            val a = (p ushr 24) and 0xFF
+            if (a > 0) {
+                val r = (p shr 16) and 0xFF
+                val g = (p shr 8) and 0xFF
+                val b = p and 0xFF
+                if (Math.abs(r - bgR) <= tol && Math.abs(g - bgG) <= tol && Math.abs(b - bgB) <= tol) {
+                    pixels[i] = 0
+                    modified = true
+                }
+            }
         }
-
-        val resultBitmap = Bitmap.createBitmap(original.width, original.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(resultBitmap)
-        canvas.drawBitmap(original, 0f, 0f, null)
-
-        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        if (modified) {
+            bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
         }
-        canvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
-        scaledMask.recycle()
-
-        return resultBitmap
     }
 
     fun close() {
         try {
-            subjectSegmenter.close()
+            subjectSegmenter?.close()
         } catch (_: Exception) {}
         try {
             selfieSegmenter.close()

@@ -19,3 +19,6 @@ captures
 /evidence/
 /mockup/
 /demo/
+/run_batch_tests.py
+test_dataset
+test_dataset/

@@ -81,6 +81,8 @@ import com.bgremover.ui.theme.StudioCardBgElevated
 import com.bgremover.ui.theme.TextPrimary
 import com.bgremover.ui.theme.TextSecondary
 import com.bgremover.util.BitmapUtils
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -102,13 +104,13 @@ fun EditorScreen(
     }
 
     val originalBitmap = remember { initialBitmap }
-    var currentBitmap by remember { mutableStateOf(BitmapUtils.copyBitmap(initialBitmap)) }
+    var currentBitmap by remember { mutableStateOf(initialBitmap) }
 
     val undoStack = remember { ArrayDeque<Bitmap>() }
     val redoStack = remember { ArrayDeque<Bitmap>() }
 
     var activeTool by remember { mutableStateOf(EditorTool.AUTO) }
-    var previewBgType by remember { mutableStateOf(PreviewBgType.CHECKERBOARD) }
+    var previewBgType by remember { mutableStateOf(PreviewBgType.BLACK) }
     var brushSizeDp by remember { mutableStateOf(26.dp) }
     var isOffsetCursorEnabled by remember { mutableStateOf(true) }
     var isShowingOriginal by remember { mutableStateOf(false) }
@@ -119,52 +121,69 @@ fun EditorScreen(
     var showExportDialog by remember { mutableStateOf(false) }
     var savedUri by remember { mutableStateOf<Uri?>(null) }
 
-    // Helper: Push state to undo stack before modifying, with memory recycling
+    // Helper: Push state to undo stack before modifying
     fun pushUndoState(oldBitmap: Bitmap) {
-        if (undoStack.size >= 6) {
-            val evicted = undoStack.removeFirst()
-            if (evicted != currentBitmap && evicted != originalBitmap && !redoStack.contains(evicted)) {
-                evicted.recycle()
+        try {
+            if (undoStack.size >= 4) {
+                undoStack.removeFirst()
             }
-        }
-        undoStack.addLast(BitmapUtils.copyBitmap(oldBitmap))
-        while (redoStack.isNotEmpty()) {
-            val r = redoStack.removeLast()
-            if (r != currentBitmap && r != originalBitmap && !undoStack.contains(r)) {
-                r.recycle()
+            val copy = BitmapUtils.copyBitmap(oldBitmap)
+            if (copy != oldBitmap) {
+                undoStack.addLast(copy)
             }
+            redoStack.clear()
+        } catch (_: Throwable) {
+            // Ignore if out of memory for undo
         }
     }
 
     var currentCutoutMode by remember { mutableStateOf(CutoutMode.SMART_AUTO) }
+    val modeCache = remember { mutableMapOf<CutoutMode, Bitmap>() }
+    var isFirstLaunch by remember { mutableStateOf(true) }
+    var cutoutJob by remember { mutableStateOf<Job?>(null) }
 
-    // AI Cutout operation
+    // AI Cutout operation with instant 0ms caching & smooth UX
     fun performAiCutout(mode: CutoutMode = currentCutoutMode) {
-        scope.launch {
-            isProcessing = true
-            currentCutoutMode = mode
-            processingMessage = when (mode) {
-                CutoutMode.AI_PORTRAIT -> "Đang phân tích tách người bằng AI (Portrait)..."
-                CutoutMode.SMART_OBJECT -> "Đang tách nền sắc nét & giữ nguyên đồ vật..."
-                CutoutMode.SMART_AUTO -> "Đang tự động nhận diện chủ thể tối ưu..."
-            }
-
-            val result = engine.removeBackground(originalBitmap, mode)
+        val cached = modeCache[mode]
+        if (cached != null) {
+            cutoutJob?.cancel()
             isProcessing = false
+            currentCutoutMode = mode
+            currentBitmap = cached
+            haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+            return
+        }
 
-            result.onSuccess { transparentResult ->
-                pushUndoState(currentBitmap)
-                currentBitmap = transparentResult
-                activeTool = EditorTool.INSPECT
-                haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
-                val msg = when (mode) {
-                    CutoutMode.AI_PORTRAIT -> "Đã tách người (AI Portrait)!"
-                    CutoutMode.SMART_OBJECT -> "Đã giữ trọn đồ vật & đạo cụ!"
-                    CutoutMode.SMART_AUTO -> "Đã tự động tách nền hoàn tất!"
+        cutoutJob?.cancel()
+        cutoutJob = scope.launch {
+            try {
+                isProcessing = true
+                currentCutoutMode = mode
+                processingMessage = when (mode) {
+                    CutoutMode.SMART_OBJECT -> "Đang giữ trọn chi tiết, đồ vật & phụ kiện..."
+                    CutoutMode.SMART_AUTO -> "Đang tự động nhận diện chủ thể tối ưu..."
                 }
-                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-            }.onFailure { err ->
-                Toast.makeText(context, "Lỗi: ${err.message}", Toast.LENGTH_LONG).show()
+
+                val result = engine.removeBackground(originalBitmap, mode)
+                isProcessing = false
+
+                result.onSuccess { transparentResult ->
+                    modeCache[mode] = transparentResult
+                    currentBitmap = transparentResult
+                    if (isFirstLaunch) {
+                        activeTool = EditorTool.AUTO
+                        isFirstLaunch = false
+                    }
+                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                }.onFailure { err ->
+                    Toast.makeText(context, "Lỗi: ${err.message}", Toast.LENGTH_LONG).show()
+                }
+            } catch (_: CancellationException) {
+                // Ignore cancellation when switching modes quickly
+            } catch (t: Throwable) {
+                isProcessing = false
+                android.util.Log.e("EditorScreen", "Error during performAiCutout", t)
+                Toast.makeText(context, "Không thể xử lý: ${t.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -177,6 +196,7 @@ fun EditorScreen(
             processingMessage = "Đang làm mịn viền cắt..."
             val smoothed = BitmapUtils.smoothCutoutEdges(currentBitmap)
             currentBitmap = smoothed
+            modeCache[currentCutoutMode] = smoothed
             isProcessing = false
             haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
             Toast.makeText(context, "Đã làm mịn viền ảnh!", Toast.LENGTH_SHORT).show()
@@ -443,7 +463,7 @@ fun EditorScreen(
                         pushUndoState(currentBitmap)
                     },
                     onBitmapEdited = {
-                        // Completed stroke
+                        modeCache[currentCutoutMode] = currentBitmap
                     }
                 )
 
@@ -525,19 +545,19 @@ fun EditorScreen(
                                         .background(if (isAutoActive) PrimaryIndigo.copy(alpha = 0.25f) else StudioCardBgElevated)
                                         .border(1.dp, if (isAutoActive) PrimaryCyan else StudioBorder, RoundedCornerShape(14.dp))
                                         .clickable { performAiCutout(CutoutMode.SMART_AUTO) }
-                                        .padding(horizontal = 6.dp, vertical = 8.dp),
+                                        .padding(horizontal = 8.dp, vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text(
                                             text = "✨ Tự động AI",
-                                            fontSize = 11.sp,
+                                            fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = if (isAutoActive) PrimaryCyan else TextPrimary
                                         )
                                         Text(
-                                            text = "Nhận diện tối ưu",
-                                            fontSize = 9.sp,
+                                            text = "Cân bằng tối ưu",
+                                            fontSize = 10.sp,
                                             color = TextSecondary
                                         )
                                     }
@@ -551,45 +571,19 @@ fun EditorScreen(
                                         .background(if (isSmartActive) PrimaryIndigo.copy(alpha = 0.25f) else StudioCardBgElevated)
                                         .border(1.dp, if (isSmartActive) PrimaryCyan else StudioBorder, RoundedCornerShape(14.dp))
                                         .clickable { performAiCutout(CutoutMode.SMART_OBJECT) }
-                                        .padding(horizontal = 6.dp, vertical = 8.dp),
+                                        .padding(horizontal = 8.dp, vertical = 8.dp),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text(
-                                            text = "🎯 Giữ đồ vật",
-                                            fontSize = 11.sp,
+                                            text = "🎯 Giữ chi tiết",
+                                            fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = if (isSmartActive) PrimaryCyan else TextPrimary
                                         )
                                         Text(
-                                            text = "Nội thất, đồ đạc",
-                                            fontSize = 9.sp,
-                                            color = TextSecondary
-                                        )
-                                    }
-                                }
-
-                                val isPortraitActive = currentCutoutMode == CutoutMode.AI_PORTRAIT
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(if (isPortraitActive) PrimaryPurple.copy(alpha = 0.25f) else StudioCardBgElevated)
-                                        .border(1.dp, if (isPortraitActive) PrimaryPurple else StudioBorder, RoundedCornerShape(14.dp))
-                                        .clickable { performAiCutout(CutoutMode.AI_PORTRAIT) }
-                                        .padding(horizontal = 6.dp, vertical = 8.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text(
-                                            text = "👤 Chỉ người",
-                                            fontSize = 11.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isPortraitActive) PrimaryPurple else TextPrimary
-                                        )
-                                        Text(
-                                            text = "Chân dung AI",
-                                            fontSize = 9.sp,
+                                            text = "Đồ vật & phụ kiện",
+                                            fontSize = 10.sp,
                                             color = TextSecondary
                                         )
                                     }
@@ -689,7 +683,7 @@ fun EditorScreen(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.78f)),
+                    .background(Color.Black.copy(alpha = if (isFirstLaunch) 0.78f else 0.40f)),
                 contentAlignment = Alignment.Center
             ) {
                 Surface(

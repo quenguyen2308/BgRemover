@@ -8,57 +8,86 @@ import kotlin.math.abs
 
 object SmartCutoutEngine {
 
+    data class BackgroundAnalysis(
+        val isUniform: Boolean,
+        val bgR: Int,
+        val bgG: Int,
+        val bgB: Int
+    )
+
     /**
-     * Checks if the image has a predominantly uniform background
-     * (e.g. solid white, studio backdrop, green screen, solid black).
-     * Samples multiple points across all 4 borders to avoid false positives.
+     * Accurately analyzes background uniformity by clustering dominant colors
+     * along the top corners, top border, and upper half of side borders
+     * (where background is cleanest in portraits, avoiding subjects at the bottom).
      */
-    fun isUniformBackground(bitmap: Bitmap, maxTolerance: Int = 22): Boolean {
+    fun analyzeBackground(bitmap: Bitmap): BackgroundAnalysis {
         val w = bitmap.width
         val h = bitmap.height
-        if (w < 20 || h < 20) return false
+        if (w < 20 || h < 20) return BackgroundAnalysis(false, 255, 255, 255)
 
-        val samplePoints = mutableListOf<Int>()
-        val stepX = maxOf(1, w / 20)
-        val stepY = maxOf(1, h / 20)
+        val samples = mutableListOf<Int>()
+        val stepX = maxOf(1, w / 40)
+        val stepY = maxOf(1, h / 40)
 
+        // Top corners
+        samples.add(bitmap.getPixel(0, 0))
+        samples.add(bitmap.getPixel(w - 1, 0))
+
+        // Top border
         for (x in 0 until w step stepX) {
-            samplePoints.add(bitmap.getPixel(x, 0))
-            samplePoints.add(bitmap.getPixel(x, h - 1))
-        }
-        for (y in 0 until h step stepY) {
-            samplePoints.add(bitmap.getPixel(0, y))
-            samplePoints.add(bitmap.getPixel(w - 1, y))
+            samples.add(bitmap.getPixel(x, 0))
         }
 
-        if (samplePoints.isEmpty()) return false
+        // Top half of left & right borders
+        for (y in 0 until (h / 2) step stepY) {
+            samples.add(bitmap.getPixel(0, y))
+            samples.add(bitmap.getPixel(w - 1, y))
+        }
 
+        if (samples.isEmpty()) return BackgroundAnalysis(false, 255, 255, 255)
+
+        // Quantize colors into 16-step bins (step of 16)
+        val binCounts = mutableMapOf<Int, Int>()
+        for (p in samples) {
+            val r = ((p shr 16) and 0xFF) / 16
+            val g = ((p shr 8) and 0xFF) / 16
+            val b = (p and 0xFF) / 16
+            val key = (r shl 16) or (g shl 8) or b
+            binCounts[key] = (binCounts[key] ?: 0) + 1
+        }
+
+        val dominantEntry = binCounts.maxByOrNull { it.value } ?: return BackgroundAnalysis(false, 255, 255, 255)
+        val dominantBin = dominantEntry.key
+        val dominantCount = dominantEntry.value
+        val ratio = dominantCount.toFloat() / samples.size
+
+        // Calculate precise average of samples inside dominant cluster
         var sumR = 0L
         var sumG = 0L
         var sumB = 0L
-        for (p in samplePoints) {
-            sumR += (p shr 16) and 0xFF
-            sumG += (p shr 8) and 0xFF
-            sumB += p and 0xFF
-        }
-        val avgR = (sumR / samplePoints.size).toInt()
-        val avgG = (sumG / samplePoints.size).toInt()
-        val avgB = (sumB / samplePoints.size).toInt()
-
-        var devCount = 0
-        for (p in samplePoints) {
-            val r = (p shr 16) and 0xFF
-            val g = (p shr 8) and 0xFF
-            val b = p and 0xFF
-            val maxDiff = maxOf(abs(r - avgR), abs(g - avgG), abs(b - avgB))
-            if (maxDiff > maxTolerance) {
-                devCount++
+        var matchCount = 0
+        for (p in samples) {
+            val r = ((p shr 16) and 0xFF) / 16
+            val g = ((p shr 8) and 0xFF) / 16
+            val b = (p and 0xFF) / 16
+            val key = (r shl 16) or (g shl 8) or b
+            if (key == dominantBin) {
+                sumR += (p shr 16) and 0xFF
+                sumG += (p shr 8) and 0xFF
+                sumB += p and 0xFF
+                matchCount++
             }
         }
 
-        val uniformRatio = 1.0f - (devCount.toFloat() / samplePoints.size)
-        return uniformRatio >= 0.85f
+        val avgR = if (matchCount > 0) (sumR / matchCount).toInt() else 255
+        val avgG = if (matchCount > 0) (sumG / matchCount).toInt() else 255
+        val avgB = if (matchCount > 0) (sumB / matchCount).toInt() else 255
+
+        val isUniform = ratio >= 0.50f
+        return BackgroundAnalysis(isUniform, avgR, avgG, avgB)
     }
+
+    fun isUniformBackground(bitmap: Bitmap): Boolean = analyzeBackground(bitmap).isUniform
 
     /**
      * High-precision, full-resolution edge-aware connected background extractor.
@@ -68,9 +97,10 @@ object SmartCutoutEngine {
      */
     suspend fun removeBackground(
         bitmap: Bitmap,
-        tolerance: Int = 13,
+        tolerance: Int = 16,
         minComponentRatio: Float = 0.008f,
-        keepFloatingStickers: Boolean = false
+        keepFloatingStickers: Boolean = false,
+        aiProtectedMask: BitSet? = null
     ): Bitmap = withContext(Dispatchers.Default) {
         val width = bitmap.width
         val height = bitmap.height
@@ -79,36 +109,11 @@ object SmartCutoutEngine {
         val pixels = IntArray(totalPixels)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
 
-        // 1. Calculate average border background color
-        var sumR = 0L
-        var sumG = 0L
-        var sumB = 0L
-        var sampleCount = 0
-
-        val stepX = maxOf(1, width / 100)
-        val stepY = maxOf(1, height / 100)
-
-        for (x in 0 until width step stepX) {
-            val topP = pixels[x]
-            val botP = pixels[(height - 1) * width + x]
-            sumR += ((topP shr 16) and 0xFF) + ((botP shr 16) and 0xFF)
-            sumG += ((topP shr 8) and 0xFF) + ((botP shr 8) and 0xFF)
-            sumB += (topP and 0xFF) + (botP and 0xFF)
-            sampleCount += 2
-        }
-
-        for (y in 0 until height step stepY) {
-            val leftP = pixels[y * width]
-            val rightP = pixels[y * width + (width - 1)]
-            sumR += ((leftP shr 16) and 0xFF) + ((rightP shr 16) and 0xFF)
-            sumG += ((leftP shr 8) and 0xFF) + ((rightP shr 8) and 0xFF)
-            sumB += (leftP and 0xFF) + (rightP and 0xFF)
-            sampleCount += 2
-        }
-
-        val bgR = (sumR / sampleCount).toInt()
-        val bgG = (sumG / sampleCount).toInt()
-        val bgB = (sumB / sampleCount).toInt()
+        // 1. Accurately detect dominant background color
+        val bgAnalysis = analyzeBackground(bitmap)
+        val bgR = bgAnalysis.bgR
+        val bgG = bgAnalysis.bgG
+        val bgB = bgAnalysis.bgB
 
         // 2. Fast flood-fill BFS using BitSet (1 bit per pixel vs 1 byte in BooleanArray, saving ~12MB)
         val isBackground = BitSet(totalPixels)
@@ -125,15 +130,15 @@ object SmartCutoutEngine {
                    abs(b - bgB) <= tolerance
         }
 
-        // Add matching border pixels as initial seeds
+        // Add matching border pixels as initial seeds (NEVER seed AI protected subject/dress pixels!)
         for (x in 0 until width) {
             val topIdx = x
             val botIdx = (height - 1) * width + x
-            if (!isBackground.get(topIdx) && isBgColor(pixels[topIdx])) {
+            if ((aiProtectedMask == null || !aiProtectedMask.get(topIdx)) && !isBackground.get(topIdx) && isBgColor(pixels[topIdx])) {
                 isBackground.set(topIdx)
                 queue[tail++] = topIdx
             }
-            if (!isBackground.get(botIdx) && isBgColor(pixels[botIdx])) {
+            if ((aiProtectedMask == null || !aiProtectedMask.get(botIdx)) && !isBackground.get(botIdx) && isBgColor(pixels[botIdx])) {
                 isBackground.set(botIdx)
                 queue[tail++] = botIdx
             }
@@ -142,17 +147,17 @@ object SmartCutoutEngine {
         for (y in 0 until height) {
             val leftIdx = y * width
             val rightIdx = y * width + (width - 1)
-            if (!isBackground.get(leftIdx) && isBgColor(pixels[leftIdx])) {
+            if ((aiProtectedMask == null || !aiProtectedMask.get(leftIdx)) && !isBackground.get(leftIdx) && isBgColor(pixels[leftIdx])) {
                 isBackground.set(leftIdx)
                 queue[tail++] = leftIdx
             }
-            if (!isBackground.get(rightIdx) && isBgColor(pixels[rightIdx])) {
+            if ((aiProtectedMask == null || !aiProtectedMask.get(rightIdx)) && !isBackground.get(rightIdx) && isBgColor(pixels[rightIdx])) {
                 isBackground.set(rightIdx)
                 queue[tail++] = rightIdx
             }
         }
 
-        // Expand flood fill to all connected background pixels
+        // Expand flood fill to all connected background pixels (cannot penetrate AI protected subject/dress)
         while (head < tail) {
             val currentIdx = queue[head++]
             val cx = currentIdx % width
@@ -161,28 +166,28 @@ object SmartCutoutEngine {
             // 4-neighborhood
             if (cx > 0) {
                 val nIdx = currentIdx - 1
-                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                if ((aiProtectedMask == null || !aiProtectedMask.get(nIdx)) && !isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
                     isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cx < width - 1) {
                 val nIdx = currentIdx + 1
-                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                if ((aiProtectedMask == null || !aiProtectedMask.get(nIdx)) && !isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
                     isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cy > 0) {
                 val nIdx = currentIdx - width
-                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                if ((aiProtectedMask == null || !aiProtectedMask.get(nIdx)) && !isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
                     isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cy < height - 1) {
                 val nIdx = currentIdx + width
-                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                if ((aiProtectedMask == null || !aiProtectedMask.get(nIdx)) && !isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
                     isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
@@ -191,6 +196,9 @@ object SmartCutoutEngine {
 
         // 3. Connected Components Analysis for foreground using BitSets & reused queue
         val isForegroundKept = BitSet(totalPixels)
+        if (aiProtectedMask != null) {
+            isForegroundKept.or(aiProtectedMask)
+        }
 
         if (keepFloatingStickers) {
             for (i in 0 until totalPixels) {
@@ -261,8 +269,7 @@ object SmartCutoutEngine {
         }
 
         // 4. Generate final transparent output bitmap with subtle edge anti-aliasing
-        val outputPixels = IntArray(totalPixels)
-
+        // In-place mutation of pixels array saves 6.3MB of memory
         for (y in 0 until height) {
             val yOffset = y * width
             for (x in 0 until width) {
@@ -274,17 +281,20 @@ object SmartCutoutEngine {
                                  (y < height - 1 && !isForegroundKept.get(idx + width))
 
                     val orig = pixels[idx]
-                    outputPixels[idx] = if (isEdge) {
+                    pixels[idx] = if (isEdge) {
                         (0xEE shl 24) or (orig and 0x00FFFFFF)
                     } else {
                         (0xFF shl 24) or (orig and 0x00FFFFFF)
                     }
                 } else {
-                    outputPixels[idx] = 0
+                    pixels[idx] = 0
                 }
             }
         }
 
-        Bitmap.createBitmap(outputPixels, width, height, Bitmap.Config.ARGB_8888)
+        // Create a guaranteed MUTABLE Bitmap so subsequent manual erasing/restoring never throws IllegalStateException
+        val resultBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        resultBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        resultBitmap
     }
 }
