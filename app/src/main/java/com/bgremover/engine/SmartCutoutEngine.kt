@@ -368,6 +368,21 @@ object SmartCutoutEngine {
             isForegroundKept.or(aiProtectedMask)
         }
 
+        fun isDashedOutlineStroke(
+            compSize: Int,
+            bw: Int,
+            bh: Int,
+            meanR: Float,
+            meanG: Float,
+            meanB: Float
+        ): Boolean {
+            if (compSize !in 15..700) return false
+            val density = compSize.toFloat() / (bw * bh)
+            val isNarrowOrArc = (minOf(bw, bh) <= 14) || (density <= 0.40f)
+            val isPastelDashColor = (meanR >= 236f && meanG >= 198f && meanB >= 192f && meanR > meanG && kotlin.math.abs(meanG - meanB) <= 18f)
+            return isNarrowOrArc && isPastelDashColor
+        }
+
         if (keepFloatingStickers) {
             val visitedFg = BitSet(totalPixels)
             val minNoisePixels = 60
@@ -377,10 +392,30 @@ object SmartCutoutEngine {
                     var cTail = 0
                     visitedFg.set(i)
                     queue[cTail++] = i
+
+                    var minX = i % width
+                    var maxX = minX
+                    var minY = i / width
+                    var maxY = minY
+                    var sumR = 0L
+                    var sumG = 0L
+                    var sumB = 0L
+
                     while (cHead < cTail) {
                         val curr = queue[cHead++]
                         val cx = curr % width
                         val cy = curr / width
+
+                        if (cx < minX) minX = cx
+                        if (cx > maxX) maxX = cx
+                        if (cy < minY) minY = cy
+                        if (cy > maxY) maxY = cy
+
+                        val p = pixels[curr]
+                        sumR += (p shr 16) and 0xFF
+                        sumG += (p shr 8) and 0xFF
+                        sumB += p and 0xFF
+
                         if (cx > 0) {
                             val nIdx = curr - 1
                             if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
@@ -410,9 +445,22 @@ object SmartCutoutEngine {
                             }
                         }
                     }
-                    if (cTail >= minNoisePixels) {
-                        for (k in 0 until cTail) {
+
+                    val compSize = cTail
+                    val bw = maxX - minX + 1
+                    val bh = maxY - minY + 1
+                    val meanR = sumR.toFloat() / compSize
+                    val meanG = sumG.toFloat() / compSize
+                    val meanB = sumB.toFloat() / compSize
+
+                    val isDash = isDashedOutlineStroke(compSize, bw, bh, meanR, meanG, meanB)
+                    if (compSize >= minNoisePixels && !isDash) {
+                        for (k in 0 until compSize) {
                             isForegroundKept.set(queue[k])
+                        }
+                    } else if (isDash && aiProtectedMask != null) {
+                        for (k in 0 until compSize) {
+                            isForegroundKept.clear(queue[k])
                         }
                     }
                 }
@@ -430,10 +478,28 @@ object SmartCutoutEngine {
                     visitedFg.set(i)
                     queue[cTail++] = i
 
+                    var minX = i % width
+                    var maxX = minX
+                    var minY = i / width
+                    var maxY = minY
+                    var sumR = 0L
+                    var sumG = 0L
+                    var sumB = 0L
+
                     while (cHead < cTail) {
                         val curr = queue[cHead++]
                         val cx = curr % width
                         val cy = curr / width
+
+                        if (cx < minX) minX = cx
+                        if (cx > maxX) maxX = cx
+                        if (cy < minY) minY = cy
+                        if (cy > maxY) maxY = cy
+
+                        val p = pixels[curr]
+                        sumR += (p shr 16) and 0xFF
+                        sumG += (p shr 8) and 0xFF
+                        sumB += p and 0xFF
 
                         if (!touchesMain) {
                             for (dy in -2..2) {
@@ -484,15 +550,21 @@ object SmartCutoutEngine {
                     }
 
                     val compSize = cTail
-                    val keep = compSize >= minComponentPixels || (touchesMain && compSize >= 60)
-                    if (compSize > 500) {
-                        android.util.Log.d("SmartCutoutEngine", "Step 3 comp: size=$compSize, touchesMain=$touchesMain, keep=$keep")
-                    }
-                    // Keep if large enough (main subject or large furniture/props)
-                    // OR if contiguous/adjacent to the main subject silhouette
+                    val bw = maxX - minX + 1
+                    val bh = maxY - minY + 1
+                    val meanR = sumR.toFloat() / compSize
+                    val meanG = sumG.toFloat() / compSize
+                    val meanB = sumB.toFloat() / compSize
+
+                    val isDash = isDashedOutlineStroke(compSize, bw, bh, meanR, meanG, meanB)
+                    val keep = !isDash && (compSize >= minComponentPixels || (touchesMain && compSize >= 60))
                     if (keep) {
                         for (k in 0 until compSize) {
                             isForegroundKept.set(queue[k])
+                        }
+                    } else if (isDash && aiProtectedMask != null) {
+                        for (k in 0 until compSize) {
+                            isForegroundKept.clear(queue[k])
                         }
                     }
                 }
