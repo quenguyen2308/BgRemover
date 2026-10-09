@@ -33,17 +33,20 @@ import androidx.compose.material.icons.filled.AddPhotoAlternate
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.HighQuality
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.UploadFile
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
@@ -98,6 +101,7 @@ fun HomeScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var recentCutouts by remember { mutableStateOf<List<SavedCutout>>(emptyList()) }
+    var cutoutToDelete by remember { mutableStateOf<SavedCutout?>(null) }
 
     fun refreshRecentCutouts() {
         scope.launch {
@@ -311,10 +315,61 @@ fun HomeScreen(
                                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                             }
                             context.startActivity(Intent.createChooser(shareIntent, "Chia sẻ ảnh PNG"))
+                        },
+                        onDelete = {
+                            cutoutToDelete = cutout
                         }
                     )
                 }
             }
+        }
+
+        // Delete Confirmation Dialog
+        cutoutToDelete?.let { target ->
+            AlertDialog(
+                onDismissRequest = { cutoutToDelete = null },
+                title = {
+                    Text(
+                        text = "Xóa ảnh tách nền",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                },
+                text = {
+                    Text(
+                        text = "Bạn có chắc muốn xóa ảnh \"${target.name}\" khỏi thiết bị?",
+                        fontSize = 13.sp,
+                        color = TextSecondary
+                    )
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            cutoutToDelete = null
+                            scope.launch {
+                                val success = BitmapUtils.deleteSavedCutout(context, target.uri)
+                                if (success) {
+                                    refreshRecentCutouts()
+                                }
+                            }
+                        }
+                    ) {
+                        Text(
+                            text = "Xóa",
+                            color = Color(0xFFEF4444),
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { cutoutToDelete = null }) {
+                        Text(text = "Hủy", color = TextSecondary)
+                    }
+                },
+                containerColor = StudioCardBg,
+                shape = RoundedCornerShape(20.dp)
+            )
         }
     }
 }
@@ -607,7 +662,8 @@ private fun StudioEmptyState(onPickImage: () -> Unit) {
 private fun StudioRecentItem(
     cutout: SavedCutout,
     onClick: () -> Unit,
-    onShare: () -> Unit
+    onShare: () -> Unit,
+    onDelete: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -655,22 +711,42 @@ private fun StudioRecentItem(
                     )
                 }
 
-                // Share Button
-                IconButton(
-                    onClick = onShare,
+                // Action Buttons: Share & Delete
+                Row(
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .size(32.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.6f))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.Default.Share,
-                        contentDescription = "Chia sẻ",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
+                    IconButton(
+                        onClick = onShare,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.6f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Share,
+                            contentDescription = "Chia sẻ",
+                            tint = Color.White,
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .size(30.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.6f))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Delete,
+                            contentDescription = "Xóa",
+                            tint = Color(0xFFEF4444),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
                 }
             }
 

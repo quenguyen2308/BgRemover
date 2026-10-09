@@ -158,7 +158,9 @@ class BgRemoverEngine(private val context: Context) {
         val maskBitmap = Bitmap.createBitmap(maskPixels, maskWidth, maskHeight, Bitmap.Config.ARGB_8888)
 
         val scaledMask = if (maskWidth != original.width || maskHeight != original.height) {
-            Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
+            val scaled = Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
+            maskBitmap.recycle()
+            scaled
         } else {
             maskBitmap
         }
@@ -171,7 +173,17 @@ class BgRemoverEngine(private val context: Context) {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
         canvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
+        scaledMask.recycle()
 
         return resultBitmap
+    }
+
+    fun close() {
+        try {
+            subjectSegmenter.close()
+        } catch (_: Exception) {}
+        try {
+            selfieSegmenter.close()
+        } catch (_: Exception) {}
     }
 }

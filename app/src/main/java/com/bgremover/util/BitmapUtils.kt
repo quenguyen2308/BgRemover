@@ -68,11 +68,13 @@ object BitmapUtils {
                 val orientation = getExifOrientation(context, uri)
                 if (orientation != 0) {
                     val matrix = Matrix().apply { postRotate(orientation.toFloat()) }
-                    Bitmap.createBitmap(
+                    val rotated = Bitmap.createBitmap(
                         decodedBitmap, 0, 0,
                         decodedBitmap.width, decodedBitmap.height,
                         matrix, true
                     )
+                    decodedBitmap.recycle()
+                    rotated
                 } else {
                     decodedBitmap
                 }
@@ -262,6 +264,73 @@ object BitmapUtils {
         }
         val canvas = Canvas(targetBitmap)
         canvas.drawPath(strokePath, paint)
+    }
+
+    suspend fun deleteSavedCutout(context: Context, uri: Uri): Boolean = withContext(Dispatchers.IO) {
+        try {
+            context.contentResolver.delete(uri, null, null) > 0
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
+        }
+    }
+
+    suspend fun saveCompositeImageToGallery(
+        context: Context,
+        cutoutBitmap: Bitmap,
+        backgroundColor: androidx.compose.ui.graphics.Color,
+        titlePrefix: String = "Cutout_Bg"
+    ): Result<Uri> = withContext(Dispatchers.IO) {
+        try {
+            val compositeBitmap = Bitmap.createBitmap(cutoutBitmap.width, cutoutBitmap.height, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(compositeBitmap)
+            val argb = android.graphics.Color.argb(
+                (backgroundColor.alpha * 255).toInt(),
+                (backgroundColor.red * 255).toInt(),
+                (backgroundColor.green * 255).toInt(),
+                (backgroundColor.blue * 255).toInt()
+            )
+            canvas.drawColor(argb)
+            canvas.drawBitmap(cutoutBitmap, 0f, 0f, null)
+            val res = saveTransparentPngToGallery(context, compositeBitmap, titlePrefix)
+            compositeBitmap.recycle()
+            res
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun smoothCutoutEdges(source: Bitmap): Bitmap = withContext(Dispatchers.Default) {
+        val w = source.width
+        val h = source.height
+        val total = w * h
+        val pixels = IntArray(total)
+        source.getPixels(pixels, 0, w, 0, 0, w, h)
+        val output = IntArray(total)
+
+        for (y in 0 until h) {
+            val yOffset = y * w
+            for (x in 0 until w) {
+                val idx = yOffset + x
+                val curr = pixels[idx]
+                val alpha = (curr shr 24) and 0xFF
+
+                if (alpha in 1..254) {
+                    var neighborAlphaSum = 0
+                    var count = 0
+                    if (x > 0) { neighborAlphaSum += (pixels[idx - 1] shr 24) and 0xFF; count++ }
+                    if (x < w - 1) { neighborAlphaSum += (pixels[idx + 1] shr 24) and 0xFF; count++ }
+                    if (y > 0) { neighborAlphaSum += (pixels[idx - w] shr 24) and 0xFF; count++ }
+                    if (y < h - 1) { neighborAlphaSum += (pixels[idx + w] shr 24) and 0xFF; count++ }
+
+                    val smoothedAlpha = if (count > 0) ((alpha * 2 + neighborAlphaSum / count) / 3).coerceIn(0, 255) else alpha
+                    output[idx] = (smoothedAlpha shl 24) or (curr and 0x00FFFFFF)
+                } else {
+                    output[idx] = curr
+                }
+            }
+        }
+        Bitmap.createBitmap(output, w, h, Bitmap.Config.ARGB_8888)
     }
 
     fun copyBitmap(source: Bitmap): Bitmap {

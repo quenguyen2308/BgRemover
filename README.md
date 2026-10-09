@@ -11,25 +11,29 @@
    - Tốc độ tách cực nhanh (~200ms - 500ms).
    - Tự động tách người, vật thể, thú cưng và giữ trọn màu sắc sắc nét của ảnh gốc.
 
-2. **Bộ công cụ chỉnh sửa thủ công (Manual Brush Tools)**:
+2. **Bộ công cụ chỉnh sửa thủ công cao cấp (Manual Brush Tools)**:
    - **Cọ tẩy (Eraser)**: Chạm và vẽ để xóa các chi tiết phông nền còn sót lại ở các góc cạnh.
    - **Cọ phục hồi (Restore)**: Chạm và vẽ để lấy lại các chi tiết của ảnh gốc bị cắt nhầm (ví dụ: viền tóc, phụ kiện).
+   - **Con trỏ bù cọ (Offset Cursor)**: Nét vẽ nhô cao hơn đầu ngón tay ~50dp kèm đường chỉ dẫn đứt nét, giúp ngón tay không bao giờ che khuất tầm nhìn chi tiết viền cần cắt.
+   - **Làm mịn viền (Smooth Edges)**: 1-chạm để khử răng cưa và làm mềm mại đường viền cắt.
    - **Thanh trượt cỡ cọ (Brush Size)**: Tùy chỉnh kích thước cọ từ 8px đến 80px với hình tròn xem trước kích thước thực.
-   - **Hỗ trợ cảm ứng đa điểm (Multi-touch Gestures)**: Dùng 2 ngón tay để thu phóng (Zoom từ 0.5x đến 8.0x) và di chuyển (Pan) ảnh mượt mà trong lúc chỉnh sửa.
+   - **Cảm ứng đa điểm (Multi-touch)**: Dùng 2 ngón tay thu phóng (Zoom 0.5x - 8.0x) và di chuyển (Pan) ảnh mượt mà bất cứ lúc nào ngay cả khi đang dùng cọ.
 
 3. **Chế độ kiểm tra độ trong suốt & So sánh**:
    - **Nền Caro (Checkerboard)**: Hiển thị chuẩn quốc tế của file PNG trong suốt.
    - **Các nền kiểm tra màu**: Chuyển nhanh giữa nền Trắng, Đen, Xanh lá (Green Screen), Đỏ, Xanh dương để phát hiện rìa viền sáng/tối.
-   - **Nút So sánh (Compare)**: Nhấn giữ nút mắt xem ảnh gốc trước khi tách.
-   - **Hoàn tác & Làm lại (Undo / Redo)**: Lưu lại các bước sửa để quay lại bất cứ lúc nào.
+   - **Nút So sánh (Compare)**: Nhấn giữ nút mắt xem ảnh gốc trước khi tách với phản hồi rung haptic.
+   - **Hoàn tác & Làm lại (Undo / Redo)**: Lưu lại các bước sửa trước mỗi nét vẽ để quay lại bất cứ lúc nào mà không tốn dung lượng RAM.
 
 4. **Xuất file PNG & Chia sẻ**:
    - Lưu chuẩn định dạng `image/png` với kênh alpha trong suốt vào Bộ sưu tập thiết bị (`Pictures/BgRemover`).
+   - Tùy chọn xuất ảnh kèm nền màu đã chọn (nền trắng làm ảnh thẻ, nền xanh lá dựng video, nền đen,...).
    - Chia sẻ nhanh sang Zalo, Messenger, Telegram, Drive,...
    - Nhận ảnh trực tiếp khi chia sẻ từ các ứng dụng khác (hỗ trợ `ACTION_SEND`).
 
-5. **Lịch sử ảnh đã lưu (Recent Creations)**:
+5. **Lịch sử ảnh đã lưu & Quản lý (Recent Creations)**:
    - Hiển thị danh sách các ảnh PNG đã tách ngay tại màn hình chính để xem và chia sẻ lại nhanh chóng.
+   - Hỗ trợ xóa các ảnh đã lưu khỏi thiết bị với hộp thoại xác nhận an toàn.
 
 ---
 

@@ -3,7 +3,7 @@ package com.bgremover.engine
 import android.graphics.Bitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.ArrayDeque
+import java.util.BitSet
 import kotlin.math.abs
 
 object SmartCutoutEngine {
@@ -11,42 +11,65 @@ object SmartCutoutEngine {
     /**
      * Checks if the image has a predominantly uniform background
      * (e.g. solid white, studio backdrop, green screen, solid black).
+     * Samples multiple points across all 4 borders to avoid false positives.
      */
-    fun isUniformBackground(bitmap: Bitmap, maxTolerance: Int = 20): Boolean {
+    fun isUniformBackground(bitmap: Bitmap, maxTolerance: Int = 22): Boolean {
         val w = bitmap.width
         val h = bitmap.height
-        if (w < 10 || h < 10) return false
+        if (w < 20 || h < 20) return false
 
-        val corner1 = bitmap.getPixel(0, 0)
-        val corner2 = bitmap.getPixel(w - 1, 0)
-        val corner3 = bitmap.getPixel(0, h - 1)
-        val corner4 = bitmap.getPixel(w - 1, h - 1)
+        val samplePoints = mutableListOf<Int>()
+        val stepX = maxOf(1, w / 20)
+        val stepY = maxOf(1, h / 20)
 
-        fun maxChannelDiff(c1: Int, c2: Int): Int {
-            val r1 = (c1 shr 16) and 0xFF
-            val g1 = (c1 shr 8) and 0xFF
-            val b1 = c1 and 0xFF
-            val r2 = (c2 shr 16) and 0xFF
-            val g2 = (c2 shr 8) and 0xFF
-            val b2 = c2 and 0xFF
-            return maxOf(abs(r1 - r2), abs(g1 - g2), abs(b1 - b2))
+        for (x in 0 until w step stepX) {
+            samplePoints.add(bitmap.getPixel(x, 0))
+            samplePoints.add(bitmap.getPixel(x, h - 1))
+        }
+        for (y in 0 until h step stepY) {
+            samplePoints.add(bitmap.getPixel(0, y))
+            samplePoints.add(bitmap.getPixel(w - 1, y))
         }
 
-        return maxChannelDiff(corner1, corner2) <= maxTolerance &&
-               maxChannelDiff(corner1, corner3) <= maxTolerance &&
-               maxChannelDiff(corner1, corner4) <= maxTolerance
+        if (samplePoints.isEmpty()) return false
+
+        var sumR = 0L
+        var sumG = 0L
+        var sumB = 0L
+        for (p in samplePoints) {
+            sumR += (p shr 16) and 0xFF
+            sumG += (p shr 8) and 0xFF
+            sumB += p and 0xFF
+        }
+        val avgR = (sumR / samplePoints.size).toInt()
+        val avgG = (sumG / samplePoints.size).toInt()
+        val avgB = (sumB / samplePoints.size).toInt()
+
+        var devCount = 0
+        for (p in samplePoints) {
+            val r = (p shr 16) and 0xFF
+            val g = (p shr 8) and 0xFF
+            val b = p and 0xFF
+            val maxDiff = maxOf(abs(r - avgR), abs(g - avgG), abs(b - avgB))
+            if (maxDiff > maxTolerance) {
+                devCount++
+            }
+        }
+
+        val uniformRatio = 1.0f - (devCount.toFloat() / samplePoints.size)
+        return uniformRatio >= 0.85f
     }
 
     /**
      * High-precision, full-resolution edge-aware connected background extractor.
      * Preserves the primary subject AND all interacting furniture/props
-     * (e.g. stairs, windows, fireplaces, chairs) while removing uniform background
-     * and filtering out small floating background sticker clutter.
+     * (e.g. stairs, windows, fireplaces, chairs) while removing uniform background.
+     * Uses memory-efficient BitSets and reuses queues to prevent OutOfMemoryError.
      */
     suspend fun removeBackground(
         bitmap: Bitmap,
         tolerance: Int = 13,
-        minComponentRatio: Float = 0.015f,
+        minComponentRatio: Float = 0.008f,
         keepFloatingStickers: Boolean = false
     ): Bitmap = withContext(Dispatchers.Default) {
         val width = bitmap.width
@@ -87,8 +110,8 @@ object SmartCutoutEngine {
         val bgG = (sumG / sampleCount).toInt()
         val bgB = (sumB / sampleCount).toInt()
 
-        // 2. Fast flood-fill BFS from all 4 borders using a circular IntArray queue
-        val isBackground = BooleanArray(totalPixels)
+        // 2. Fast flood-fill BFS using BitSet (1 bit per pixel vs 1 byte in BooleanArray, saving ~12MB)
+        val isBackground = BitSet(totalPixels)
         val queue = IntArray(totalPixels)
         var head = 0
         var tail = 0
@@ -106,12 +129,12 @@ object SmartCutoutEngine {
         for (x in 0 until width) {
             val topIdx = x
             val botIdx = (height - 1) * width + x
-            if (!isBackground[topIdx] && isBgColor(pixels[topIdx])) {
-                isBackground[topIdx] = true
+            if (!isBackground.get(topIdx) && isBgColor(pixels[topIdx])) {
+                isBackground.set(topIdx)
                 queue[tail++] = topIdx
             }
-            if (!isBackground[botIdx] && isBgColor(pixels[botIdx])) {
-                isBackground[botIdx] = true
+            if (!isBackground.get(botIdx) && isBgColor(pixels[botIdx])) {
+                isBackground.set(botIdx)
                 queue[tail++] = botIdx
             }
         }
@@ -119,12 +142,12 @@ object SmartCutoutEngine {
         for (y in 0 until height) {
             val leftIdx = y * width
             val rightIdx = y * width + (width - 1)
-            if (!isBackground[leftIdx] && isBgColor(pixels[leftIdx])) {
-                isBackground[leftIdx] = true
+            if (!isBackground.get(leftIdx) && isBgColor(pixels[leftIdx])) {
+                isBackground.set(leftIdx)
                 queue[tail++] = leftIdx
             }
-            if (!isBackground[rightIdx] && isBgColor(pixels[rightIdx])) {
-                isBackground[rightIdx] = true
+            if (!isBackground.get(rightIdx) && isBgColor(pixels[rightIdx])) {
+                isBackground.set(rightIdx)
                 queue[tail++] = rightIdx
             }
         }
@@ -138,89 +161,84 @@ object SmartCutoutEngine {
             // 4-neighborhood
             if (cx > 0) {
                 val nIdx = currentIdx - 1
-                if (!isBackground[nIdx] && isBgColor(pixels[nIdx])) {
-                    isBackground[nIdx] = true
+                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                    isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cx < width - 1) {
                 val nIdx = currentIdx + 1
-                if (!isBackground[nIdx] && isBgColor(pixels[nIdx])) {
-                    isBackground[nIdx] = true
+                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                    isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cy > 0) {
                 val nIdx = currentIdx - width
-                if (!isBackground[nIdx] && isBgColor(pixels[nIdx])) {
-                    isBackground[nIdx] = true
+                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                    isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
             if (cy < height - 1) {
                 val nIdx = currentIdx + width
-                if (!isBackground[nIdx] && isBgColor(pixels[nIdx])) {
-                    isBackground[nIdx] = true
+                if (!isBackground.get(nIdx) && isBgColor(pixels[nIdx])) {
+                    isBackground.set(nIdx)
                     queue[tail++] = nIdx
                 }
             }
         }
 
-        // 3. Connected Components Analysis for foreground
-        val isForegroundKept = BooleanArray(totalPixels)
+        // 3. Connected Components Analysis for foreground using BitSets & reused queue
+        val isForegroundKept = BitSet(totalPixels)
 
         if (keepFloatingStickers) {
-            // Keep everything that wasn't flooded by background
             for (i in 0 until totalPixels) {
-                if (!isBackground[i]) isForegroundKept[i] = true
+                if (!isBackground.get(i)) isForegroundKept.set(i)
             }
         } else {
-            // Find connected components to retain the main subject and its props
-            // while discarding disconnected small sticker clutter
-            val visitedFg = BooleanArray(totalPixels)
+            val visitedFg = BitSet(totalPixels)
             val minComponentPixels = (totalPixels * minComponentRatio).toInt()
 
-            val compQueue = IntArray(totalPixels)
-
             for (i in 0 until totalPixels) {
-                if (!isBackground[i] && !visitedFg[i]) {
+                if (!isBackground.get(i) && !visitedFg.get(i)) {
                     var cHead = 0
                     var cTail = 0
 
-                    visitedFg[i] = true
-                    compQueue[cTail++] = i
+                    visitedFg.set(i)
+                    queue[cTail++] = i
 
                     while (cHead < cTail) {
-                        val curr = compQueue[cHead++]
+                        val curr = queue[cHead++]
                         val cx = curr % width
                         val cy = curr / width
 
                         if (cx > 0) {
                             val nIdx = curr - 1
-                            if (!isBackground[nIdx] && !visitedFg[nIdx]) {
-                                visitedFg[nIdx] = true
-                                compQueue[cTail++] = nIdx
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
                             }
                         }
                         if (cx < width - 1) {
                             val nIdx = curr + 1
-                            if (!isBackground[nIdx] && !visitedFg[nIdx]) {
-                                visitedFg[nIdx] = true
-                                compQueue[cTail++] = nIdx
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
                             }
                         }
                         if (cy > 0) {
                             val nIdx = curr - width
-                            if (!isBackground[nIdx] && !visitedFg[nIdx]) {
-                                visitedFg[nIdx] = true
-                                compQueue[cTail++] = nIdx
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
                             }
                         }
                         if (cy < height - 1) {
                             val nIdx = curr + width
-                            if (!isBackground[nIdx] && !visitedFg[nIdx]) {
-                                visitedFg[nIdx] = true
-                                compQueue[cTail++] = nIdx
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
                             }
                         }
                     }
@@ -228,11 +246,18 @@ object SmartCutoutEngine {
                     val compSize = cTail
                     if (compSize >= minComponentPixels) {
                         for (k in 0 until compSize) {
-                            isForegroundKept[compQueue[k]] = true
+                            isForegroundKept.set(queue[k])
                         }
                     }
                 }
             }
+        }
+
+        // Safety check: verify foreground was reasonably segmented
+        val fgCount = isForegroundKept.cardinality()
+        val fgRatio = fgCount.toFloat() / totalPixels
+        if (fgRatio < 0.005f || fgRatio > 0.99f) {
+            throw IllegalStateException("SmartCutout failed to isolate subject (fgRatio=$fgRatio)")
         }
 
         // 4. Generate final transparent output bitmap with subtle edge anti-aliasing
@@ -242,22 +267,20 @@ object SmartCutoutEngine {
             val yOffset = y * width
             for (x in 0 until width) {
                 val idx = yOffset + x
-                if (isForegroundKept[idx]) {
-                    // Check if on edge for 1px anti-aliasing
-                    val isEdge = (x > 0 && !isForegroundKept[idx - 1]) ||
-                                 (x < width - 1 && !isForegroundKept[idx + 1]) ||
-                                 (y > 0 && !isForegroundKept[idx - width]) ||
-                                 (y < height - 1 && !isForegroundKept[idx + width])
+                if (isForegroundKept.get(idx)) {
+                    val isEdge = (x > 0 && !isForegroundKept.get(idx - 1)) ||
+                                 (x < width - 1 && !isForegroundKept.get(idx + 1)) ||
+                                 (y > 0 && !isForegroundKept.get(idx - width)) ||
+                                 (y < height - 1 && !isForegroundKept.get(idx + width))
 
                     val orig = pixels[idx]
                     outputPixels[idx] = if (isEdge) {
-                        // Smooth edge transition
                         (0xEE shl 24) or (orig and 0x00FFFFFF)
                     } else {
                         (0xFF shl 24) or (orig and 0x00FFFFFF)
                     }
                 } else {
-                    outputPixels[idx] = 0 // Full transparent
+                    outputPixels[idx] = 0
                 }
             }
         }

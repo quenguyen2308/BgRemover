@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ColorLens
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,6 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import com.bgremover.model.PreviewBgType
 import com.bgremover.ui.theme.EmeraldSuccess
 import com.bgremover.ui.theme.PrimaryCyan
 import com.bgremover.ui.theme.PrimaryIndigo
@@ -53,8 +55,10 @@ import com.bgremover.ui.theme.TextTertiary
 fun ExportSuccessDialog(
     bitmap: Bitmap,
     savedUri: Uri?,
+    selectedBg: PreviewBgType? = null,
     onDismiss: () -> Unit,
     onShare: () -> Unit,
+    onSaveWithBackground: (() -> Unit)? = null,
     onPickAnother: () -> Unit
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -125,8 +129,30 @@ fun ExportSuccessDialog(
                     text = "Lưu tại: Bộ nhớ trong > Pictures > BgRemover",
                     fontSize = 11.sp,
                     color = TextTertiary,
-                    modifier = Modifier.padding(top = 10.dp, bottom = 18.dp)
+                    modifier = Modifier.padding(top = 10.dp, bottom = 14.dp)
                 )
+
+                // Save with background button if color background is chosen
+                if (selectedBg != null && selectedBg != PreviewBgType.CHECKERBOARD && onSaveWithBackground != null) {
+                    OutlinedButton(
+                        onClick = onSaveWithBackground,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp)
+                            .padding(bottom = 8.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, PrimaryCyan.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = PrimaryCyan)
+                    ) {
+                        Icon(imageVector = Icons.Default.ColorLens, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Lưu thêm ảnh kèm nền ${selectedBg.displayName}",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
 
                 // Glowing Share Action Button
                 Button(
