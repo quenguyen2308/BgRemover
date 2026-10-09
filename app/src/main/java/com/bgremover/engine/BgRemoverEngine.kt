@@ -89,12 +89,14 @@ class BgRemoverEngine(private val context: Context) {
                 if (bgAnalysis.isUniform && (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_AUTO)) {
                     try {
                         val keepStickers = (mode == CutoutMode.SMART_OBJECT)
-                        Log.d(TAG, "Running full-res SmartCutoutEngine (keepStickers=$keepStickers, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
+                        val aiMask = getAiForegroundMask(inputBitmap, inputImage)
+                        Log.d(TAG, "Running full-res SmartCutoutEngine (keepStickers=$keepStickers, hasAiMask=${aiMask != null}, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
                         val smartResult = SmartCutoutEngine.removeBackground(
                             bitmap = inputBitmap,
-                            tolerance = 16,
+                            tolerance = 14,
                             minComponentRatio = 0.008f,
-                            keepFloatingStickers = keepStickers
+                            keepFloatingStickers = keepStickers,
+                            aiProtectedMask = null
                         )
                         return@withLock Result.success(smartResult)
                     } catch (t: Throwable) {
@@ -267,7 +269,14 @@ class BgRemoverEngine(private val context: Context) {
         val capacity = maskBuffer.capacity()
         val (actualW, actualH) = if (capacity > 0 && capacity != maskWidth * maskHeight) {
             val side = Math.sqrt(capacity.toDouble()).toInt()
-            if (side * side == capacity) Pair(side, side) else Pair(maskWidth, maskHeight)
+            if (side * side == capacity) {
+                Pair(side, side)
+            } else {
+                val aspect = targetWidth.toFloat() / targetHeight.toFloat()
+                val h = Math.sqrt(capacity / aspect.toDouble()).toInt()
+                val w = (h * aspect).toInt()
+                if (w * h <= capacity) Pair(w, h) else Pair(maskWidth, maskHeight)
+            }
         } else {
             Pair(maskWidth, maskHeight)
         }
@@ -383,7 +392,7 @@ class BgRemoverEngine(private val context: Context) {
         for (i in 0 until total) {
             val p = pixels[i]
             val a = (p ushr 24) and 0xFF
-            if (a > 0) {
+            if (a in 1..250) {
                 val r = (p shr 16) and 0xFF
                 val g = (p shr 8) and 0xFF
                 val b = p and 0xFF

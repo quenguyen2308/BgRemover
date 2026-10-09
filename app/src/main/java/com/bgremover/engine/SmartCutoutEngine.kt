@@ -194,6 +194,174 @@ object SmartCutoutEngine {
             }
         }
 
+        // 2b. Identify Main Foreground Silhouette Components (subject + interacting furniture/props)
+        // This allows us to distinguish genuine cavities trapped between the subject and props
+        // from disconnected floating stickers (like flowers/hearts) or outer elements.
+        val fgVisited = BitSet(totalPixels)
+        val isMainForeground = BitSet(totalPixels)
+        val minMainSilhouettePixels = (totalPixels * 0.03f).toInt() // At least 3% of the image
+
+        for (i in 0 until totalPixels) {
+            if (!isBackground.get(i) && !fgVisited.get(i)) {
+                var cHead = 0
+                var cTail = 0
+                fgVisited.set(i)
+                queue[cTail++] = i
+
+                while (cHead < cTail) {
+                    val curr = queue[cHead++]
+                    val cx = curr % width
+                    val cy = curr / width
+
+                    if (cx > 0) {
+                        val nIdx = curr - 1
+                        if (!isBackground.get(nIdx) && !fgVisited.get(nIdx)) {
+                            fgVisited.set(nIdx)
+                            queue[cTail++] = nIdx
+                        }
+                    }
+                    if (cx < width - 1) {
+                        val nIdx = curr + 1
+                        if (!isBackground.get(nIdx) && !fgVisited.get(nIdx)) {
+                            fgVisited.set(nIdx)
+                            queue[cTail++] = nIdx
+                        }
+                    }
+                    if (cy > 0) {
+                        val nIdx = curr - width
+                        if (!isBackground.get(nIdx) && !fgVisited.get(nIdx)) {
+                            fgVisited.set(nIdx)
+                            queue[cTail++] = nIdx
+                        }
+                    }
+                    if (cy < height - 1) {
+                        val nIdx = curr + width
+                        if (!isBackground.get(nIdx) && !fgVisited.get(nIdx)) {
+                            fgVisited.set(nIdx)
+                            queue[cTail++] = nIdx
+                        }
+                    }
+                }
+
+                if (cTail >= minMainSilhouettePixels) {
+                    for (k in 0 until cTail) {
+                        isMainForeground.set(queue[k])
+                    }
+                }
+            }
+        }
+
+        // 2c. Enclosed Cavity Detection & Removal
+        // Accurately extracts cavities trapped between the subject and props (e.g. gap under armpit,
+        // gap between dress ruffle and fireplace column) without eroding the subject's clothing.
+        // A true background cavity has a mean color virtually identical to the studio background
+        // (dist <= 5.5 or high pureBgRatio) and borders the main foreground silhouette.
+        val cavityVisited = BitSet(totalPixels)
+        for (i in 0 until totalPixels) {
+            if (!isBackground.get(i) && !cavityVisited.get(i) && isBgColor(pixels[i])) {
+                var cHead = 0
+                var cTail = 0
+                cavityVisited.set(i)
+                queue[cTail++] = i
+
+                var sumR = 0L
+                var sumG = 0L
+                var sumB = 0L
+                var pureBgCount = 0
+                var bordersMainFg = false
+                var aiOverlapCount = 0
+
+                while (cHead < cTail) {
+                    val curr = queue[cHead++]
+                    val cx = curr % width
+                    val cy = curr / width
+
+                    val p = pixels[curr]
+                    val r = (p shr 16) and 0xFF
+                    val g = (p shr 8) and 0xFF
+                    val b = p and 0xFF
+                    sumR += r
+                    sumG += g
+                    sumB += b
+
+                    if (abs(r - bgR) <= 3 && abs(g - bgG) <= 3 && abs(b - bgB) <= 3) {
+                        pureBgCount++
+                    }
+                    if (aiProtectedMask != null && aiProtectedMask.get(curr)) {
+                        aiOverlapCount++
+                    }
+
+                    // Check 4-neighborhood
+                    if (cx > 0) {
+                        val nIdx = curr - 1
+                        if (!isBackground.get(nIdx)) {
+                            if (isMainForeground.get(nIdx)) bordersMainFg = true
+                            if (!cavityVisited.get(nIdx) && isBgColor(pixels[nIdx])) {
+                                cavityVisited.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                    }
+                    if (cx < width - 1) {
+                        val nIdx = curr + 1
+                        if (!isBackground.get(nIdx)) {
+                            if (isMainForeground.get(nIdx)) bordersMainFg = true
+                            if (!cavityVisited.get(nIdx) && isBgColor(pixels[nIdx])) {
+                                cavityVisited.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                    }
+                    if (cy > 0) {
+                        val nIdx = curr - width
+                        if (!isBackground.get(nIdx)) {
+                            if (isMainForeground.get(nIdx)) bordersMainFg = true
+                            if (!cavityVisited.get(nIdx) && isBgColor(pixels[nIdx])) {
+                                cavityVisited.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                    }
+                    if (cy < height - 1) {
+                        val nIdx = curr + width
+                        if (!isBackground.get(nIdx)) {
+                            if (isMainForeground.get(nIdx)) bordersMainFg = true
+                            if (!cavityVisited.get(nIdx) && isBgColor(pixels[nIdx])) {
+                                cavityVisited.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                    }
+                }
+
+                val compSize = cTail
+                val isAiSubject = (aiProtectedMask != null && compSize > 0 && (aiOverlapCount.toFloat() / compSize) > 0.35f)
+                // Enclosed cavities must border the main subject/prop silhouette and contain at least 20 pixels
+                if (!isAiSubject && bordersMainFg && compSize >= 20) {
+                    val meanR = sumR.toFloat() / compSize
+                    val meanG = sumG.toFloat() / compSize
+                    val meanB = sumB.toFloat() / compSize
+                    val dist = kotlin.math.sqrt(
+                        (meanR - bgR) * (meanR - bgR) +
+                        (meanG - bgG) * (meanG - bgG) +
+                        (meanB - bgB) * (meanB - bgB)
+                    )
+                    val pureRatio = pureBgCount.toFloat() / compSize
+
+                    // True backdrop cavities are virtually identical to backdrop (dist <= 5.0 AND pureRatio >= 0.35).
+                    // Clothing highlights and folds have ivory/shadow shades with dist >= 12.0 and pureRatio <= 0.03.
+                    if (dist <= 5.0f && pureRatio >= 0.35f) {
+                        android.util.Log.d("SmartCutoutEngine", "REMOVING cavity of size=$compSize (dist=$dist, pureRatio=$pureRatio)")
+                        for (k in 0 until compSize) {
+                            isBackground.set(queue[k])
+                        }
+                    }
+                }
+            }
+        }
+
+        android.util.Log.d("SmartCutoutEngine", "After Step 2c cavity removal: bgCount=${isBackground.cardinality()}")
+
         // 3. Connected Components Analysis for foreground using BitSets & reused queue
         val isForegroundKept = BitSet(totalPixels)
         if (aiProtectedMask != null) {
@@ -201,8 +369,53 @@ object SmartCutoutEngine {
         }
 
         if (keepFloatingStickers) {
+            val visitedFg = BitSet(totalPixels)
+            val minNoisePixels = 60
             for (i in 0 until totalPixels) {
-                if (!isBackground.get(i)) isForegroundKept.set(i)
+                if (!isBackground.get(i) && !visitedFg.get(i)) {
+                    var cHead = 0
+                    var cTail = 0
+                    visitedFg.set(i)
+                    queue[cTail++] = i
+                    while (cHead < cTail) {
+                        val curr = queue[cHead++]
+                        val cx = curr % width
+                        val cy = curr / width
+                        if (cx > 0) {
+                            val nIdx = curr - 1
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                        if (cx < width - 1) {
+                            val nIdx = curr + 1
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                        if (cy > 0) {
+                            val nIdx = curr - width
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                        if (cy < height - 1) {
+                            val nIdx = curr + width
+                            if (!isBackground.get(nIdx) && !visitedFg.get(nIdx)) {
+                                visitedFg.set(nIdx)
+                                queue[cTail++] = nIdx
+                            }
+                        }
+                    }
+                    if (cTail >= minNoisePixels) {
+                        for (k in 0 until cTail) {
+                            isForegroundKept.set(queue[k])
+                        }
+                    }
+                }
             }
         } else {
             val visitedFg = BitSet(totalPixels)
@@ -212,6 +425,7 @@ object SmartCutoutEngine {
                 if (!isBackground.get(i) && !visitedFg.get(i)) {
                     var cHead = 0
                     var cTail = 0
+                    var touchesMain = false
 
                     visitedFg.set(i)
                     queue[cTail++] = i
@@ -220,6 +434,24 @@ object SmartCutoutEngine {
                         val curr = queue[cHead++]
                         val cx = curr % width
                         val cy = curr / width
+
+                        if (!touchesMain) {
+                            for (dy in -2..2) {
+                                val ny = cy + dy
+                                if (ny in 0 until height) {
+                                    for (dx in -2..2) {
+                                        val nx = cx + dx
+                                        if (nx in 0 until width) {
+                                            if (isMainForeground.get(ny * width + nx)) {
+                                                touchesMain = true
+                                                break
+                                            }
+                                        }
+                                    }
+                                    if (touchesMain) break
+                                }
+                            }
+                        }
 
                         if (cx > 0) {
                             val nIdx = curr - 1
@@ -252,7 +484,13 @@ object SmartCutoutEngine {
                     }
 
                     val compSize = cTail
-                    if (compSize >= minComponentPixels) {
+                    val keep = compSize >= minComponentPixels || (touchesMain && compSize >= 60)
+                    if (compSize > 500) {
+                        android.util.Log.d("SmartCutoutEngine", "Step 3 comp: size=$compSize, touchesMain=$touchesMain, keep=$keep")
+                    }
+                    // Keep if large enough (main subject or large furniture/props)
+                    // OR if contiguous/adjacent to the main subject silhouette
+                    if (keep) {
                         for (k in 0 until compSize) {
                             isForegroundKept.set(queue[k])
                         }
@@ -295,6 +533,7 @@ object SmartCutoutEngine {
         // Create a guaranteed MUTABLE Bitmap so subsequent manual erasing/restoring never throws IllegalStateException
         val resultBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
         resultBitmap.setPixels(pixels, 0, width, 0, 0, width, height)
+        android.util.Log.d("SmartCutoutEngine", "SmartCutout finished. fgRatio=$fgRatio, totalFg=${isForegroundKept.cardinality()}")
         resultBitmap
     }
 }
