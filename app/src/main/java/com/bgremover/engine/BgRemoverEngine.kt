@@ -60,11 +60,20 @@ class BgRemoverEngine(private val context: Context) {
     }
 
     // 2. Bundled 100% On-Device Local Selfie Segmenter
-    private val selfieOptions: SelfieSegmenterOptions = SelfieSegmenterOptions.Builder()
-        .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
-        .build()
+    private val selfieOptions: SelfieSegmenterOptions by lazy {
+        SelfieSegmenterOptions.Builder()
+            .setDetectorMode(SelfieSegmenterOptions.SINGLE_IMAGE_MODE)
+            .build()
+    }
 
-    private val selfieSegmenter: Segmenter = Segmentation.getClient(selfieOptions)
+    private val selfieSegmenter: Segmenter? by lazy {
+        try {
+            Segmentation.getClient(selfieOptions)
+        } catch (t: Throwable) {
+            Log.w(TAG, "SelfieSegmenter client initialization failed: ${t.message}")
+            null
+        }
+    }
 
     suspend fun removeBackground(
         inputBitmap: Bitmap,
@@ -85,7 +94,6 @@ class BgRemoverEngine(private val context: Context) {
                 // Studio / Uniform Backdrop (e.g. White, Studio Screen, Monochrome):
                 // SmartCutoutEngine operates at native 100% full-resolution, giving
                 // razor-sharp edges without the blurry white halo of low-res neural masks.
-                // aiProtectedMask guarantees that light dresses (like Image 4) are never eroded.
                 // ===================================================================
                 if (bgAnalysis.isUniform && (mode == CutoutMode.SMART_OBJECT || mode == CutoutMode.SMART_AUTO || mode == CutoutMode.SMART_CLEAN)) {
                     try {
@@ -93,7 +101,6 @@ class BgRemoverEngine(private val context: Context) {
                         val cleanCavities = (mode == CutoutMode.SMART_CLEAN)
                         val removeDashes = (mode == CutoutMode.SMART_CLEAN)
                         val tol = if (mode == CutoutMode.SMART_CLEAN) 14 else 16
-                        val aiMask = getAiForegroundMask(inputBitmap, inputImage)
                         Log.d(TAG, "Running full-res SmartCutoutEngine (mode=$mode, keepStickers=$keepStickers, cleanCavities=$cleanCavities, removeDashes=$removeDashes, tol=$tol, bg=RGB(${bgAnalysis.bgR},${bgAnalysis.bgG},${bgAnalysis.bgB}))...")
                         val smartResult = SmartCutoutEngine.removeBackground(
                             bitmap = inputBitmap,
@@ -193,10 +200,11 @@ class BgRemoverEngine(private val context: Context) {
         }
 
         // 2. Offline Fallback with Local Selfie Engine (100% on-device)
+        val localSegmenter = selfieSegmenter ?: return null
         return try {
             val selfieMask = suspendCancellableCoroutine<com.google.mlkit.vision.segmentation.SegmentationMask?> { continuation ->
                 try {
-                    selfieSegmenter.process(inputImage)
+                    localSegmenter.process(inputImage)
                         .addOnSuccessListener { if (continuation.isActive) continuation.resume(it) }
                         .addOnFailureListener { if (continuation.isActive) continuation.resume(null) }
                 } catch (_: Throwable) {
@@ -236,10 +244,11 @@ class BgRemoverEngine(private val context: Context) {
         }
 
         // Fallback to Selfie Segmenter
+        val localSegmenter = selfieSegmenter ?: return null
         try {
             val selfieMask = suspendCancellableCoroutine<com.google.mlkit.vision.segmentation.SegmentationMask?> { continuation ->
                 try {
-                    selfieSegmenter.process(inputImage)
+                    localSegmenter.process(inputImage)
                         .addOnSuccessListener { if (continuation.isActive) continuation.resume(it) }
                         .addOnFailureListener { if (continuation.isActive) continuation.resume(null) }
                 } catch (_: Throwable) {
@@ -270,26 +279,30 @@ class BgRemoverEngine(private val context: Context) {
         targetHeight: Int,
         threshold: Float = 0.20f
     ): BitSet {
-        val bitSet = BitSet(targetWidth * targetHeight)
-        maskBuffer.rewind()
+        val totalTarget = targetWidth * targetHeight
+        val bitSet = BitSet(totalTarget)
         val capacity = maskBuffer.capacity()
-        val (actualW, actualH) = if (capacity > 0 && capacity != maskWidth * maskHeight) {
+        if (capacity <= 0 || targetWidth <= 0 || targetHeight <= 0) return bitSet
+        maskBuffer.rewind()
+
+        val (actualW, actualH) = if (capacity != maskWidth * maskHeight) {
             val side = Math.sqrt(capacity.toDouble()).toInt()
-            if (side * side == capacity) {
+            if (side * side == capacity && side > 0) {
                 Pair(side, side)
             } else {
                 val aspect = targetWidth.toFloat() / targetHeight.toFloat()
-                val h = Math.sqrt(capacity / aspect.toDouble()).toInt()
-                val w = (h * aspect).toInt()
-                if (w * h <= capacity) Pair(w, h) else Pair(maskWidth, maskHeight)
+                val h = Math.sqrt(capacity / aspect.toDouble()).toInt().coerceAtLeast(1)
+                val w = (h * aspect).toInt().coerceAtLeast(1)
+                if (w * h <= capacity) Pair(w, h) else Pair(maskWidth.coerceAtLeast(1), maskHeight.coerceAtLeast(1))
             }
         } else {
-            Pair(maskWidth, maskHeight)
+            Pair(maskWidth.coerceAtLeast(1), maskHeight.coerceAtLeast(1))
         }
 
+        if (actualW <= 0 || actualH <= 0) return bitSet
+
         if (actualW == targetWidth && actualH == targetHeight) {
-            val total = targetWidth * targetHeight
-            for (i in 0 until total) {
+            for (i in 0 until totalTarget) {
                 if (maskBuffer.hasRemaining() && maskBuffer.get() >= threshold) {
                     bitSet.set(i)
                 }
@@ -331,19 +344,23 @@ class BgRemoverEngine(private val context: Context) {
     ): Bitmap? {
         return try {
             val capacity = maskBuffer.capacity()
-            val (actualW, actualH) = if (capacity > 0 && capacity != maskWidth * maskHeight) {
+            if (capacity <= 0 || original.width <= 0 || original.height <= 0) return null
+
+            val (actualW, actualH) = if (capacity != maskWidth * maskHeight) {
                 val side = Math.sqrt(capacity.toDouble()).toInt()
-                if (side * side == capacity) {
+                if (side * side == capacity && side > 0) {
                     Pair(side, side)
                 } else {
                     val aspect = original.width.toFloat() / original.height.toFloat()
-                    val h = Math.sqrt(capacity / aspect.toDouble()).toInt()
-                    val w = (h * aspect).toInt()
-                    if (w * h <= capacity) Pair(w, h) else Pair(maskWidth, maskHeight)
+                    val h = Math.sqrt(capacity / aspect.toDouble()).toInt().coerceAtLeast(1)
+                    val w = (h * aspect).toInt().coerceAtLeast(1)
+                    if (w * h <= capacity) Pair(w, h) else Pair(maskWidth.coerceAtLeast(1), maskHeight.coerceAtLeast(1))
                 }
             } else {
-                Pair(maskWidth, maskHeight)
+                Pair(maskWidth.coerceAtLeast(1), maskHeight.coerceAtLeast(1))
             }
+
+            if (actualW <= 0 || actualH <= 0) return null
 
             val totalPixels = actualW * actualH
             val maskPixels = IntArray(totalPixels)
@@ -363,7 +380,11 @@ class BgRemoverEngine(private val context: Context) {
             val maskBitmap = Bitmap.createBitmap(maskPixels, actualW, actualH, Bitmap.Config.ARGB_8888)
 
             val scaledMask = if (actualW != original.width || actualH != original.height) {
-                Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
+                val scaled = Bitmap.createScaledBitmap(maskBitmap, original.width, original.height, true)
+                if (scaled != maskBitmap) {
+                    maskBitmap.recycle()
+                }
+                scaled
             } else {
                 maskBitmap
             }
@@ -376,6 +397,7 @@ class BgRemoverEngine(private val context: Context) {
                 xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
             }
             canvas.drawBitmap(scaledMask, 0f, 0f, maskPaint)
+            scaledMask.recycle()
 
             if (bgAnalysis != null && bgAnalysis.isUniform) {
                 defringeBitmap(resultBitmap, bgAnalysis.bgR, bgAnalysis.bgG, bgAnalysis.bgB, 16)
@@ -416,9 +438,9 @@ class BgRemoverEngine(private val context: Context) {
     fun close() {
         try {
             subjectSegmenter?.close()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         try {
-            selfieSegmenter.close()
-        } catch (_: Exception) {}
+            selfieSegmenter?.close()
+        } catch (_: Throwable) {}
     }
 }

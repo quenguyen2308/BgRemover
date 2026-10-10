@@ -97,17 +97,25 @@ fun EditorScreen(
     val haptic = LocalHapticFeedback.current
     val engine = remember { BgRemoverEngine(context) }
 
-    DisposableEffect(Unit) {
+    val originalBitmap = remember(initialBitmap) { initialBitmap }
+    var currentBitmap by remember(initialBitmap) { mutableStateOf(initialBitmap) }
+
+    val undoStack = remember(initialBitmap) { ArrayDeque<Bitmap>() }
+    val redoStack = remember(initialBitmap) { ArrayDeque<Bitmap>() }
+
+    var currentCutoutMode by remember(initialBitmap) { mutableStateOf(CutoutMode.SMART_AUTO) }
+    val modeCache = remember(initialBitmap) { mutableMapOf<CutoutMode, Bitmap>() }
+    var isFirstLaunch by remember(initialBitmap) { mutableStateOf(true) }
+    var cutoutJob by remember { mutableStateOf<Job?>(null) }
+
+    DisposableEffect(initialBitmap) {
         onDispose {
             engine.close()
+            undoStack.clear()
+            redoStack.clear()
+            modeCache.clear()
         }
     }
-
-    val originalBitmap = remember { initialBitmap }
-    var currentBitmap by remember { mutableStateOf(initialBitmap) }
-
-    val undoStack = remember { ArrayDeque<Bitmap>() }
-    val redoStack = remember { ArrayDeque<Bitmap>() }
 
     var activeTool by remember { mutableStateOf(EditorTool.AUTO) }
     var previewBgType by remember { mutableStateOf(PreviewBgType.BLACK) }
@@ -124,7 +132,7 @@ fun EditorScreen(
     // Helper: Push state to undo stack before modifying
     fun pushUndoState(oldBitmap: Bitmap) {
         try {
-            if (undoStack.size >= 4) {
+            if (undoStack.size >= 3) {
                 undoStack.removeFirst()
             }
             val copy = BitmapUtils.copyBitmap(oldBitmap)
@@ -136,11 +144,6 @@ fun EditorScreen(
             // Ignore if out of memory for undo
         }
     }
-
-    var currentCutoutMode by remember { mutableStateOf(CutoutMode.SMART_AUTO) }
-    val modeCache = remember { mutableMapOf<CutoutMode, Bitmap>() }
-    var isFirstLaunch by remember { mutableStateOf(true) }
-    var cutoutJob by remember { mutableStateOf<Job?>(null) }
 
     // AI Cutout operation with instant 0ms caching & smooth UX
     fun performAiCutout(mode: CutoutMode = currentCutoutMode) {
@@ -222,7 +225,7 @@ fun EditorScreen(
     }
 
     // Auto-run AI Cutout when Editor opens for the first time
-    LaunchedEffect(Unit) {
+    LaunchedEffect(initialBitmap) {
         performAiCutout(CutoutMode.SMART_AUTO)
     }
 

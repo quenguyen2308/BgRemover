@@ -201,7 +201,7 @@ fun ExportSuccessDialog(
                         border = androidx.compose.foundation.BorderStroke(1.dp, StudioBorder),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = PrimaryCyan)
                     ) {
-                        Text("Tách ảnh khác", fontSize = 12.sp)
+                        Text("Ảnh khác", fontSize = 12.sp)
                     }
                 }
             }

@@ -44,7 +44,7 @@ object BitmapUtils {
         }
     }
 
-    suspend fun loadBitmapFromUri(context: Context, uri: Uri, maxDimension: Int = 2048): Bitmap? =
+    suspend fun loadBitmapFromUri(context: Context, uri: Uri, maxDimension: Int = 1800): Bitmap? =
         withContext(Dispatchers.IO) {
             try {
                 // 1. Check dimensions first
@@ -90,9 +90,9 @@ object BitmapUtils {
 
                 if (decodedBitmap == null) return@withContext null
 
-                // 3. Fix EXIF orientation
+                // 3. Fix EXIF orientation and ensure the returned bitmap is 100% mutable
                 val orientation = getExifOrientation(context, uri)
-                if (orientation != 0) {
+                val finalBitmap = if (orientation != 0) {
                     try {
                         val matrix = Matrix().apply { postRotate(orientation.toFloat()) }
                         val rotated = Bitmap.createBitmap(
@@ -103,13 +103,33 @@ object BitmapUtils {
                         if (rotated != decodedBitmap) {
                             decodedBitmap.recycle()
                         }
-                        rotated
+                        // Bitmap.createBitmap with matrix returns an immutable bitmap; ensure mutable copy
+                        if (!rotated.isMutable) {
+                            val mutableCopy = rotated.copy(Bitmap.Config.ARGB_8888, true)
+                            if (mutableCopy != null) {
+                                if (mutableCopy != rotated) rotated.recycle()
+                                mutableCopy
+                            } else {
+                                rotated
+                            }
+                        } else {
+                            rotated
+                        }
                     } catch (_: Throwable) {
-                        decodedBitmap
+                        if (!decodedBitmap.isMutable) {
+                            decodedBitmap.copy(Bitmap.Config.ARGB_8888, true) ?: decodedBitmap
+                        } else {
+                            decodedBitmap
+                        }
                     }
                 } else {
-                    decodedBitmap
+                    if (!decodedBitmap.isMutable) {
+                        decodedBitmap.copy(Bitmap.Config.ARGB_8888, true) ?: decodedBitmap
+                    } else {
+                        decodedBitmap
+                    }
                 }
+                finalBitmap
             } catch (t: Throwable) {
                 t.printStackTrace()
                 null
@@ -127,7 +147,7 @@ object BitmapUtils {
                     else -> 0
                 }
             } ?: 0
-        } catch (e: Exception) {
+        } catch (_: Throwable) {
             0
         }
     }

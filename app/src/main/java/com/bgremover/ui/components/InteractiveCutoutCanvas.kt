@@ -214,14 +214,16 @@ fun InteractiveCutoutCanvas(
             val imgLeft = ((canvasWidth / 2f) + userPan.x - (displayedW / 2f)).toInt()
             val imgTop = ((canvasHeight / 2f) + userPan.y - (displayedH / 2f)).toInt()
 
-            // Draw bitmap
-            drawImage(
-                image = bitmapToDraw.asImageBitmap(),
-                srcOffset = IntOffset(0, 0),
-                srcSize = IntSize(bitmapToDraw.width, bitmapToDraw.height),
-                dstOffset = IntOffset(imgLeft, imgTop),
-                dstSize = IntSize(displayedW, displayedH)
-            )
+            // Draw bitmap safely (prevent IllegalArgumentException if layout dimensions are zero or uninitialized)
+            if (!bitmapToDraw.isRecycled && displayedW > 0 && displayedH > 0 && bitmapToDraw.width > 0 && bitmapToDraw.height > 0) {
+                drawImage(
+                    image = bitmapToDraw.asImageBitmap(),
+                    srcOffset = IntOffset(0, 0),
+                    srcSize = IntSize(bitmapToDraw.width, bitmapToDraw.height),
+                    dstOffset = IntOffset(imgLeft, imgTop),
+                    dstSize = IntSize(displayedW, displayedH)
+                )
+            }
 
             // Draw dashed connector line if offset cursor is active
             fingerTouchPosition?.let { fPos ->

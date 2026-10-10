@@ -144,11 +144,35 @@ fun MainContent(
         }
     }
 
-    // Photo Picker launcher
+    // Photo Picker launchers (with fallback for devices/ROMs lacking system photo picker)
+    val getContentLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        uri?.let { loadBitmapFromUri(it) }
+    }
+
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         uri?.let { loadBitmapFromUri(it) }
+    }
+
+    fun launchPhotoPicker() {
+        try {
+            if (ActivityResultContracts.PickVisualMedia.isPhotoPickerAvailable(context)) {
+                photoPickerLauncher.launch(
+                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                )
+            } else {
+                getContentLauncher.launch("image/*")
+            }
+        } catch (_: Throwable) {
+            try {
+                getContentLauncher.launch("image/*")
+            } catch (t: Throwable) {
+                Toast.makeText(context, "Không thể mở bộ chọn ảnh: ${t.message}", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     // Camera capture launcher
@@ -196,15 +220,13 @@ fun MainContent(
                 onPickAnother = {
                     activeBitmap = null
                     onResetUri()
-                    photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                    launchPhotoPicker()
                 }
             )
         } else {
             HomeScreen(
                 onPickImageFromGallery = {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
+                    launchPhotoPicker()
                 },
                 onTakePhotoFromCamera = {
                     startCamera()
